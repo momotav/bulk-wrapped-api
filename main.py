@@ -116,23 +116,54 @@ def fetch_user_tweets(handle):
 
 def filter_bulk_tweets(tweets):
     """
-    Filter tweets that mention @bulktrade in text OR in photo tags
+    Filter tweets that are related to BULK project.
+    
+    Rules:
+    1. If tweet contains @bulktrade → count it
+    2. If tweet contains "bulk" AND one of the context keywords → count it
     """
     bulk_tweets = []
     
+    # Context keywords that confirm "bulk" is about the BULK project
+    context_keywords = [
+        "perp",
+        "dex", 
+        "exchange",
+        "trade",
+        "long",
+        "short",
+        "liquidation",
+        "decentralized",
+        "trading",
+        "community",
+        "role",
+        "og",
+        "contributor",
+        "@kdotcrypto",
+        "@rizzy_sol",
+        "@glowburger",
+        "@junbug_sol"
+        "testnet"
+        "mainnet"
+    ]
+    
     for tweet in tweets:
-        text = tweet.get("text", "").lower()
+        text = tweet.get("text", "")
+        text_lower = text.lower()
         is_bulk_related = False
         
-        # Check 1: Text mentions @bulktrade
-        if "@bulktrade" in text or "bulktrade" in text:
+        # Rule 1: Direct @bulktrade mention (in text or user_mentions)
+        if "@bulktrade" in text_lower:
             is_bulk_related = True
         
-        # Check 2: Photo tags mention @bulktrade
-        if not is_bulk_related:
-            is_bulk_related = check_photo_tags(tweet)
+        # Rule 2: "bulk" + context keyword
+        if not is_bulk_related and "bulk" in text_lower:
+            for keyword in context_keywords:
+                if keyword in text_lower:
+                    is_bulk_related = True
+                    break
         
-        # Check 3: User mentions in entities
+        # Rule 3: Check user_mentions for @bulktrade
         if not is_bulk_related:
             is_bulk_related = check_user_mentions(tweet)
         
@@ -143,7 +174,7 @@ def filter_bulk_tweets(tweets):
             tweet["is_article"] = check_if_article(tweet)
             bulk_tweets.append(tweet)
     
-    print(f"Found {len(bulk_tweets)} tweets mentioning @bulktrade")
+    print(f"Found {len(bulk_tweets)} BULK-related tweets")
     return bulk_tweets
 
 
@@ -551,14 +582,31 @@ def debug_bulk():
         # Fetch tweets
         tweets = fetch_user_tweets(handle)
         
+        # Context keywords
+        context_keywords = [
+            "perp", "dex", "exchange", "trade", "long", "short",
+            "liquidation", "decentralized", "trading", "community",
+            "role", "og", "contributor", "@kdotcrypto", "@rizzy_sol",
+            "@glowburger", "@junbug_sol"
+        ]
+        
         # Analyze each tweet
         results = []
-        for tweet in tweets[:30]:
+        for tweet in tweets[:50]:
             text = tweet.get("text", "")
             text_lower = text.lower()
             
-            # Check text
-            text_has_bulk = "@bulktrade" in text_lower or "bulktrade" in text_lower
+            # Check @bulktrade
+            has_at_bulktrade = "@bulktrade" in text_lower
+            
+            # Check "bulk" + context
+            has_bulk_word = "bulk" in text_lower
+            matched_context = None
+            if has_bulk_word and not has_at_bulktrade:
+                for kw in context_keywords:
+                    if kw in text_lower:
+                        matched_context = kw
+                        break
             
             # Check user_mentions
             entities = tweet.get("entities", {})
@@ -566,28 +614,19 @@ def debug_bulk():
             mention_names = [m.get("screen_name", "").lower() for m in user_mentions]
             mentions_has_bulk = "bulktrade" in mention_names
             
-            # Check media for tags (probably not available)
-            media = tweet.get("media", {})
-            media_info = None
-            if isinstance(media, dict):
-                photos = media.get("photo", [])
-                if photos:
-                    media_info = {
-                        "has_photos": True,
-                        "photo_keys": list(photos[0].keys()) if photos else [],
-                        "first_photo": photos[0] if photos else None
-                    }
-            
-            is_bulk = text_has_bulk or mentions_has_bulk
+            # Determine if BULK related
+            is_bulk = has_at_bulktrade or (has_bulk_word and matched_context) or mentions_has_bulk
             
             results.append({
-                "text_preview": text[:80] + "..." if len(text) > 80 else text,
-                "text_has_bulk": text_has_bulk,
-                "mentions_has_bulk": mentions_has_bulk,
-                "all_mentions": mention_names,
+                "text_preview": text[:120] + "..." if len(text) > 120 else text,
+                "detected_by": {
+                    "@bulktrade_in_text": has_at_bulktrade,
+                    "bulk_word": has_bulk_word,
+                    "context_keyword": matched_context,
+                    "user_mention": mentions_has_bulk
+                },
                 "is_bulk_related": is_bulk,
-                "media_info": media_info,
-                "extracted_media_url": extract_media_url(tweet)
+                "media_url": extract_media_url(tweet)
             })
         
         bulk_count = sum(1 for r in results if r["is_bulk_related"])
@@ -597,6 +636,7 @@ def debug_bulk():
             "handle": handle,
             "total_scanned": len(results),
             "bulk_related_count": bulk_count,
+            "context_keywords": context_keywords,
             "tweets": results
         })
     except Exception as e:
