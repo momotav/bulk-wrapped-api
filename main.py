@@ -116,26 +116,129 @@ def fetch_user_tweets(handle):
 
 def filter_bulk_tweets(tweets):
     """
-    Filter tweets that mention @bulktrade and extract media
+    Filter tweets that mention @bulktrade in text OR in photo tags
     """
     bulk_tweets = []
     
     for tweet in tweets:
         text = tweet.get("text", "").lower()
+        is_bulk_related = False
         
-        # Check if tweet mentions @bulktrade
+        # Check 1: Text mentions @bulktrade
         if "@bulktrade" in text or "bulktrade" in text:
+            is_bulk_related = True
+        
+        # Check 2: Photo tags mention @bulktrade
+        if not is_bulk_related:
+            is_bulk_related = check_photo_tags(tweet)
+        
+        # Check 3: User mentions in entities
+        if not is_bulk_related:
+            is_bulk_related = check_user_mentions(tweet)
+        
+        if is_bulk_related:
             # Extract media URL
             media_url = extract_media_url(tweet)
             tweet["extracted_media"] = media_url
-            
-            # Check if it's an article (long-form content)
             tweet["is_article"] = check_if_article(tweet)
-            
             bulk_tweets.append(tweet)
     
     print(f"Found {len(bulk_tweets)} tweets mentioning @bulktrade")
     return bulk_tweets
+
+
+def check_photo_tags(tweet):
+    """
+    Check if @bulktrade is tagged in any photos
+    """
+    # Check media for tagged users
+    media = tweet.get("media", {})
+    
+    # Could be dict or list
+    if isinstance(media, dict):
+        media_items = []
+        if "photo" in media:
+            media_items.extend(media.get("photo", []))
+        if "video" in media:
+            media_items.extend(media.get("video", []))
+    elif isinstance(media, list):
+        media_items = media
+    else:
+        media_items = []
+    
+    for item in media_items:
+        # Check tagged_users / features / tags
+        tagged_users = item.get("tagged_users", [])
+        for user in tagged_users:
+            screen_name = user.get("screen_name", "").lower()
+            if screen_name == "bulktrade":
+                return True
+        
+        # Check features.all.tags
+        features = item.get("features", {})
+        all_features = features.get("all", {})
+        tags = all_features.get("tags", [])
+        for tag in tags:
+            screen_name = tag.get("screen_name", "").lower()
+            if screen_name == "bulktrade":
+                return True
+        
+        # Check ext_media_availability or other fields
+        faces = item.get("faces", [])
+        for face in faces:
+            if face.get("screen_name", "").lower() == "bulktrade":
+                return True
+    
+    # Check extended_entities
+    extended = tweet.get("extended_entities", {})
+    ext_media = extended.get("media", [])
+    for item in ext_media:
+        # Check features
+        features = item.get("features", {})
+        if features:
+            for size_key in ["large", "medium", "small", "orig", "all"]:
+                size_features = features.get(size_key, {})
+                faces = size_features.get("faces", [])
+                for face in faces:
+                    if face.get("screen_name", "").lower() == "bulktrade":
+                        return True
+        
+        # Direct tagged users on media item
+        tagged = item.get("tagged_users", []) or item.get("tags", [])
+        for user in tagged:
+            if isinstance(user, dict):
+                screen_name = user.get("screen_name", "") or user.get("name", "")
+                if screen_name.lower() == "bulktrade":
+                    return True
+            elif isinstance(user, str):
+                if user.lower() == "bulktrade":
+                    return True
+    
+    return False
+
+
+def check_user_mentions(tweet):
+    """
+    Check user_mentions in entities for @bulktrade
+    """
+    entities = tweet.get("entities", {})
+    user_mentions = entities.get("user_mentions", [])
+    
+    for mention in user_mentions:
+        screen_name = mention.get("screen_name", "").lower()
+        if screen_name == "bulktrade":
+            return True
+    
+    # Also check in extended_entities
+    extended = tweet.get("extended_entities", {})
+    ext_mentions = extended.get("user_mentions", [])
+    
+    for mention in ext_mentions:
+        screen_name = mention.get("screen_name", "").lower()
+        if screen_name == "bulktrade":
+            return True
+    
+    return False
 
 
 def extract_media_url(tweet):
@@ -395,6 +498,51 @@ def test_user():
         return jsonify({
             "success": True,
             "user": response.json()
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/debug-tweets', methods=['GET'])
+def debug_tweets():
+    """Debug endpoint to see raw tweet structure"""
+    handle = request.args.get('handle', 'momotavrrr')
+    
+    if not RAPIDAPI_KEY:
+        return jsonify({"error": "RAPIDAPI_KEY not set"}), 500
+    
+    headers = {
+        "x-rapidapi-key": RAPIDAPI_KEY,
+        "x-rapidapi-host": RAPIDAPI_HOST
+    }
+    
+    try:
+        url = f"https://{RAPIDAPI_HOST}/timeline.php"
+        response = requests.get(url, headers=headers, params={"screenname": handle}, timeout=30)
+        
+        if response.status_code != 200:
+            return jsonify({"error": f"API returned {response.status_code}"}), 500
+        
+        data = response.json()
+        timeline = data.get("timeline", [])
+        
+        # Find tweets with media
+        tweets_with_media = []
+        for tweet in timeline[:10]:
+            has_media = bool(tweet.get("media")) or bool(tweet.get("extended_entities", {}).get("media"))
+            tweets_with_media.append({
+                "text": tweet.get("text", "")[:100],
+                "has_media": has_media,
+                "media_field": tweet.get("media"),
+                "extended_entities": tweet.get("extended_entities"),
+                "entities": tweet.get("entities"),
+                "all_keys": list(tweet.keys())
+            })
+        
+        return jsonify({
+            "success": True,
+            "total_tweets": len(timeline),
+            "sample_tweets": tweets_with_media
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
