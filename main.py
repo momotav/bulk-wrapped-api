@@ -247,48 +247,39 @@ def extract_media_url(tweet):
     """
     media_url = None
     
-    # Try different locations where media might be
-    # 1. Direct media object
+    # Primary location: media.photo[]
     media = tweet.get("media", {})
-    if media:
-        if isinstance(media, dict):
-            if "photo" in media and media["photo"]:
-                media_url = media["photo"][0].get("media_url_https")
-            elif "video" in media and media["video"]:
-                media_url = media["video"][0].get("media_url_https") or media["video"][0].get("thumbnail_url")
-        elif isinstance(media, list) and media:
-            media_url = media[0].get("media_url_https")
     
-    # 2. Extended entities
+    if isinstance(media, dict):
+        # Check photo array
+        photos = media.get("photo", [])
+        if photos and len(photos) > 0:
+            media_url = photos[0].get("media_url_https")
+        
+        # Check video array
+        if not media_url:
+            videos = media.get("video", [])
+            if videos and len(videos) > 0:
+                media_url = videos[0].get("media_url_https") or videos[0].get("thumbnail_url")
+    
+    elif isinstance(media, list) and len(media) > 0:
+        media_url = media[0].get("media_url_https")
+    
+    # Fallback: extended_entities
     if not media_url:
-        extended = tweet.get("extended_entities", {}) or tweet.get("entities", {})
+        extended = tweet.get("extended_entities", {})
         if extended:
-            media_list = extended.get("media", [])
-            if media_list:
-                media_url = media_list[0].get("media_url_https")
+            ext_media = extended.get("media", [])
+            if ext_media and len(ext_media) > 0:
+                media_url = ext_media[0].get("media_url_https")
     
-    # 3. Media URL directly on tweet
+    # Fallback: entities.media
     if not media_url:
-        media_url = tweet.get("media_url") or tweet.get("media_url_https")
-    
-    # 4. Check for card/preview image (for articles/links)
-    if not media_url:
-        card = tweet.get("card", {}) or tweet.get("quoted_status", {})
-        if card:
-            media_url = card.get("thumbnail_image_url") or card.get("media_url_https")
-    
-    # 5. Try attachments
-    if not media_url:
-        attachments = tweet.get("attachments", {})
-        if attachments:
-            media_keys = attachments.get("media_keys", [])
-            if media_keys:
-                includes = tweet.get("includes", {})
-                media_list = includes.get("media", [])
-                for m in media_list:
-                    if m.get("media_key") in media_keys:
-                        media_url = m.get("url") or m.get("preview_image_url")
-                        break
+        entities = tweet.get("entities", {})
+        if entities:
+            ent_media = entities.get("media", [])
+            if ent_media and len(ent_media) > 0:
+                media_url = ent_media[0].get("media_url_https")
     
     return media_url
 
@@ -543,6 +534,70 @@ def debug_tweets():
             "success": True,
             "total_tweets": len(timeline),
             "sample_tweets": tweets_with_media
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/debug-bulk', methods=['GET'])
+def debug_bulk():
+    """Debug endpoint to see which posts are detected as BULK-related"""
+    handle = request.args.get('handle', 'momotavrrr')
+    
+    if not RAPIDAPI_KEY:
+        return jsonify({"error": "RAPIDAPI_KEY not set"}), 500
+    
+    try:
+        # Fetch tweets
+        tweets = fetch_user_tweets(handle)
+        
+        # Analyze each tweet
+        results = []
+        for tweet in tweets[:30]:
+            text = tweet.get("text", "")
+            text_lower = text.lower()
+            
+            # Check text
+            text_has_bulk = "@bulktrade" in text_lower or "bulktrade" in text_lower
+            
+            # Check user_mentions
+            entities = tweet.get("entities", {})
+            user_mentions = entities.get("user_mentions", [])
+            mention_names = [m.get("screen_name", "").lower() for m in user_mentions]
+            mentions_has_bulk = "bulktrade" in mention_names
+            
+            # Check media for tags (probably not available)
+            media = tweet.get("media", {})
+            media_info = None
+            if isinstance(media, dict):
+                photos = media.get("photo", [])
+                if photos:
+                    media_info = {
+                        "has_photos": True,
+                        "photo_keys": list(photos[0].keys()) if photos else [],
+                        "first_photo": photos[0] if photos else None
+                    }
+            
+            is_bulk = text_has_bulk or mentions_has_bulk
+            
+            results.append({
+                "text_preview": text[:80] + "..." if len(text) > 80 else text,
+                "text_has_bulk": text_has_bulk,
+                "mentions_has_bulk": mentions_has_bulk,
+                "all_mentions": mention_names,
+                "is_bulk_related": is_bulk,
+                "media_info": media_info,
+                "extracted_media_url": extract_media_url(tweet)
+            })
+        
+        bulk_count = sum(1 for r in results if r["is_bulk_related"])
+        
+        return jsonify({
+            "success": True,
+            "handle": handle,
+            "total_scanned": len(results),
+            "bulk_related_count": bulk_count,
+            "tweets": results
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
