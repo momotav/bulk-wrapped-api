@@ -116,7 +116,7 @@ def fetch_user_tweets(handle):
 
 def filter_bulk_tweets(tweets):
     """
-    Filter tweets that mention @bulktrade
+    Filter tweets that mention @bulktrade and extract media
     """
     bulk_tweets = []
     
@@ -125,10 +125,96 @@ def filter_bulk_tweets(tweets):
         
         # Check if tweet mentions @bulktrade
         if "@bulktrade" in text or "bulktrade" in text:
+            # Extract media URL
+            media_url = extract_media_url(tweet)
+            tweet["extracted_media"] = media_url
+            
+            # Check if it's an article (long-form content)
+            tweet["is_article"] = check_if_article(tweet)
+            
             bulk_tweets.append(tweet)
     
     print(f"Found {len(bulk_tweets)} tweets mentioning @bulktrade")
     return bulk_tweets
+
+
+def extract_media_url(tweet):
+    """
+    Extract the best media URL from a tweet
+    """
+    media_url = None
+    
+    # Try different locations where media might be
+    # 1. Direct media object
+    media = tweet.get("media", {})
+    if media:
+        if isinstance(media, dict):
+            if "photo" in media and media["photo"]:
+                media_url = media["photo"][0].get("media_url_https")
+            elif "video" in media and media["video"]:
+                media_url = media["video"][0].get("media_url_https") or media["video"][0].get("thumbnail_url")
+        elif isinstance(media, list) and media:
+            media_url = media[0].get("media_url_https")
+    
+    # 2. Extended entities
+    if not media_url:
+        extended = tweet.get("extended_entities", {}) or tweet.get("entities", {})
+        if extended:
+            media_list = extended.get("media", [])
+            if media_list:
+                media_url = media_list[0].get("media_url_https")
+    
+    # 3. Media URL directly on tweet
+    if not media_url:
+        media_url = tweet.get("media_url") or tweet.get("media_url_https")
+    
+    # 4. Check for card/preview image (for articles/links)
+    if not media_url:
+        card = tweet.get("card", {}) or tweet.get("quoted_status", {})
+        if card:
+            media_url = card.get("thumbnail_image_url") or card.get("media_url_https")
+    
+    # 5. Try attachments
+    if not media_url:
+        attachments = tweet.get("attachments", {})
+        if attachments:
+            media_keys = attachments.get("media_keys", [])
+            if media_keys:
+                includes = tweet.get("includes", {})
+                media_list = includes.get("media", [])
+                for m in media_list:
+                    if m.get("media_key") in media_keys:
+                        media_url = m.get("url") or m.get("preview_image_url")
+                        break
+    
+    return media_url
+
+
+def check_if_article(tweet):
+    """
+    Check if tweet is a Twitter article (long-form content)
+    """
+    text = tweet.get("text", "")
+    
+    # Articles often have these indicators
+    if "article" in text.lower():
+        return True
+    
+    # Check for card type
+    card = tweet.get("card", {})
+    if card:
+        card_type = card.get("type", "")
+        if "article" in card_type.lower():
+            return True
+    
+    # Check URL for article pattern
+    urls = tweet.get("entities", {}).get("urls", [])
+    for url in urls:
+        expanded = url.get("expanded_url", "")
+        if "/i/articles/" in expanded or "twitter.com/i/article" in expanded:
+            return True
+    
+    return False
 
 
 def calculate_wrapped_stats(tweets, handle):
@@ -165,6 +251,7 @@ def calculate_wrapped_stats(tweets, handle):
         total_replies += replies
         
         tweet_url = f"https://twitter.com/{handle}/status/{tweet.get('tweet_id', tweet.get('id', ''))}"
+        media_url = tweet.get('extracted_media')
         
         # Track most viral (by views)
         if views > max_views:
@@ -174,7 +261,8 @@ def calculate_wrapped_stats(tweets, handle):
                 "views": views,
                 "likes": likes,
                 "url": tweet_url,
-                "date": tweet.get('created_at', '')
+                "date": tweet.get('created_at', ''),
+                "media": media_url
             }
         
         # Track most liked
@@ -185,7 +273,8 @@ def calculate_wrapped_stats(tweets, handle):
                 "views": views,
                 "likes": likes,
                 "url": tweet_url,
-                "date": tweet.get('created_at', '')
+                "date": tweet.get('created_at', ''),
+                "media": media_url
             }
         
         # Track first post
