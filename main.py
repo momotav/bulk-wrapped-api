@@ -1,5 +1,5 @@
 """
-BULK Wrapped API - Fetches Twitter data via RapidAPI Twitter API45
+BULK Wrapped API - Speed Optimized for Railway (30s timeout)
 """
 
 from flask import Flask, request, jsonify
@@ -16,17 +16,28 @@ CORS(app)
 RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "")
 RAPIDAPI_HOST = "twitter-api45.p.rapidapi.com"
 
+
 @app.route('/')
 def home():
     return jsonify({"status": "BULK Wrapped API is running"})
 
 
-@app.route('/api/wrapped', methods=['POST'])
+@app.route('/api/ping', methods=['GET'])
+def ping():
+    """Health check"""
+    return jsonify({"status": "ok", "message": "Server is running"})
+
+
+@app.route('/api/wrapped', methods=['POST', 'OPTIONS'])
 def get_wrapped():
     """
     Fetch user's @bulktrade mentions and calculate wrapped stats
+    SPEED OPTIMIZED: 3 pages max, 8s timeout per request
     """
-    data = request.json
+    if request.method == 'OPTIONS':
+        return '', 204
+    
+    data = request.json or {}
     handle = data.get('handle', '').strip().replace('@', '')
     
     if not handle:
@@ -36,8 +47,8 @@ def get_wrapped():
         return jsonify({"error": "API not configured"}), 500
     
     try:
-        # Fetch user's tweets
-        tweets = fetch_user_tweets(handle)
+        # Fetch user's tweets (FAST: 3 pages, 8s timeout)
+        tweets = fetch_user_tweets_fast(handle)
         
         # Filter for @bulktrade mentions
         bulk_tweets = filter_bulk_tweets(tweets)
@@ -66,13 +77,14 @@ def get_wrapped():
         return jsonify({"error": str(e)}), 500
 
 
-def fetch_user_tweets(handle):
+def fetch_user_tweets_fast(handle):
     """
-    Fetch user's timeline using RapidAPI Twitter API45
+    FAST version: Only 3 pages, 8s timeout per request
+    Total max time: ~24 seconds (fits in Railway 30s limit)
     """
     all_tweets = []
     cursor = None
-    max_pages = 5  # ~100 tweets - fits within Railway 30s timeout
+    max_pages = 3  # REDUCED from 5 to 3
     
     headers = {
         "x-rapidapi-key": RAPIDAPI_KEY,
@@ -89,32 +101,33 @@ def fetch_user_tweets(handle):
         print(f"Fetching page {page + 1} for @{handle}...")
         
         try:
-            response = requests.get(url, headers=headers, params=params, timeout=10)
+            response = requests.get(url, headers=headers, params=params, timeout=8)  # 8s timeout
+            
+            if response.status_code != 200:
+                print(f"API error: {response.status_code}")
+                if page == 0:
+                    raise Exception(f"Failed to fetch user @{handle}. They may not exist or have a private account.")
+                break
+            
+            data = response.json()
+            timeline = data.get("timeline", [])
+            
+            if not timeline:
+                break
+            
+            all_tweets.extend(timeline)
+            cursor = data.get("next_cursor")
+            
+            if not cursor:
+                break
+                
         except requests.exceptions.Timeout:
-            print(f"Timeout on page {page + 1}, stopping early")
+            print(f"Timeout on page {page + 1}, using what we have")
             break
         except Exception as e:
             print(f"Error on page {page + 1}: {e}")
-            break
-        
-        if response.status_code != 200:
-            print(f"API error: {response.status_code} - {response.text}")
             if page == 0:
-                raise Exception(f"Failed to fetch user @{handle}. They may not exist or have a private account.")
-            break
-        
-        data = response.json()
-        
-        # Extract tweets from response
-        timeline = data.get("timeline", [])
-        if not timeline:
-            break
-        
-        all_tweets.extend(timeline)
-        
-        # Get cursor for next page
-        cursor = data.get("next_cursor")
-        if not cursor:
+                raise
             break
     
     print(f"Total tweets fetched: {len(all_tweets)}")
@@ -123,33 +136,18 @@ def fetch_user_tweets(handle):
 
 def filter_bulk_tweets(tweets):
     """
-    Filter tweets that are related to BULK project.
-    
+    Filter tweets related to BULK project.
     Rules:
-    1. If tweet contains @bulktrade → count it
-    2. If tweet contains "bulk" AND one of the context keywords → count it
+    1. @bulktrade in text → count it
+    2. "bulk" + context keyword → count it
     """
     bulk_tweets = []
     
-    # Context keywords that confirm "bulk" is about the BULK project
     context_keywords = [
-        "perp",
-        "dex", 
-        "exchange",
-        "trade",
-        "long",
-        "short",
-        "liquidation",
-        "decentralized",
-        "trading",
-        "community",
-        "role",
-        "og",
-        "contributor",
-        "@kdotcrypto",
-        "@rizzy_sol",
-        "@glowburger",
-        "@junbug_sol"
+        "perp", "dex", "exchange", "trade", "long", "short",
+        "liquidation", "decentralized", "trading", "community",
+        "role", "og", "contributor", "@kdotcrypto", "@rizzy_sol",
+        "@glowburger", "@junbug_sol", "bulkgram", "testnet"
     ]
     
     for tweet in tweets:
@@ -157,7 +155,7 @@ def filter_bulk_tweets(tweets):
         text_lower = text.lower()
         is_bulk_related = False
         
-        # Rule 1: Direct @bulktrade mention (in text or user_mentions)
+        # Rule 1: Direct @bulktrade mention
         if "@bulktrade" in text_lower:
             is_bulk_related = True
         
@@ -170,193 +168,53 @@ def filter_bulk_tweets(tweets):
         
         # Rule 3: Check user_mentions for @bulktrade
         if not is_bulk_related:
-            is_bulk_related = check_user_mentions(tweet)
+            user_mentions = tweet.get("entities", {}).get("user_mentions", [])
+            for mention in user_mentions:
+                if mention.get("screen_name", "").lower() == "bulktrade":
+                    is_bulk_related = True
+                    break
         
         if is_bulk_related:
-            # Extract media URL
-            media_url = extract_media_url(tweet)
-            tweet["extracted_media"] = media_url
-            tweet["is_article"] = check_if_article(tweet)
+            tweet["extracted_media"] = extract_media_url(tweet)
             bulk_tweets.append(tweet)
     
     print(f"Found {len(bulk_tweets)} BULK-related tweets")
     return bulk_tweets
 
 
-def check_photo_tags(tweet):
-    """
-    Check if @bulktrade is tagged in any photos
-    """
-    # Check media for tagged users
-    media = tweet.get("media", {})
-    
-    # Could be dict or list
-    if isinstance(media, dict):
-        media_items = []
-        if "photo" in media:
-            media_items.extend(media.get("photo", []))
-        if "video" in media:
-            media_items.extend(media.get("video", []))
-    elif isinstance(media, list):
-        media_items = media
-    else:
-        media_items = []
-    
-    for item in media_items:
-        # Check tagged_users / features / tags
-        tagged_users = item.get("tagged_users", [])
-        for user in tagged_users:
-            screen_name = user.get("screen_name", "").lower()
-            if screen_name == "bulktrade":
-                return True
-        
-        # Check features.all.tags
-        features = item.get("features", {})
-        all_features = features.get("all", {})
-        tags = all_features.get("tags", [])
-        for tag in tags:
-            screen_name = tag.get("screen_name", "").lower()
-            if screen_name == "bulktrade":
-                return True
-        
-        # Check ext_media_availability or other fields
-        faces = item.get("faces", [])
-        for face in faces:
-            if face.get("screen_name", "").lower() == "bulktrade":
-                return True
-    
-    # Check extended_entities
-    extended = tweet.get("extended_entities", {})
-    ext_media = extended.get("media", [])
-    for item in ext_media:
-        # Check features
-        features = item.get("features", {})
-        if features:
-            for size_key in ["large", "medium", "small", "orig", "all"]:
-                size_features = features.get(size_key, {})
-                faces = size_features.get("faces", [])
-                for face in faces:
-                    if face.get("screen_name", "").lower() == "bulktrade":
-                        return True
-        
-        # Direct tagged users on media item
-        tagged = item.get("tagged_users", []) or item.get("tags", [])
-        for user in tagged:
-            if isinstance(user, dict):
-                screen_name = user.get("screen_name", "") or user.get("name", "")
-                if screen_name.lower() == "bulktrade":
-                    return True
-            elif isinstance(user, str):
-                if user.lower() == "bulktrade":
-                    return True
-    
-    return False
-
-
-def check_user_mentions(tweet):
-    """
-    Check user_mentions in entities for @bulktrade
-    """
-    entities = tweet.get("entities", {})
-    user_mentions = entities.get("user_mentions", [])
-    
-    for mention in user_mentions:
-        screen_name = mention.get("screen_name", "").lower()
-        if screen_name == "bulktrade":
-            return True
-    
-    # Also check in extended_entities
-    extended = tweet.get("extended_entities", {})
-    ext_mentions = extended.get("user_mentions", [])
-    
-    for mention in ext_mentions:
-        screen_name = mention.get("screen_name", "").lower()
-        if screen_name == "bulktrade":
-            return True
-    
-    return False
-
-
 def extract_media_url(tweet):
-    """
-    Extract the best media URL from a tweet
-    """
-    media_url = None
-    
-    # Primary location: media.photo[] or media.video[]
+    """Extract media URL from tweet"""
     media = tweet.get("media")
     
-    # Handle dict format: {"photo": [...], "video": [...]}
+    # Handle dict format
     if isinstance(media, dict):
-        # Check photo array
         photos = media.get("photo", [])
         if photos and len(photos) > 0:
-            media_url = photos[0].get("media_url_https") or photos[0].get("media_url")
+            return photos[0].get("media_url_https") or photos[0].get("media_url")
         
-        # Check video array
-        if not media_url:
-            videos = media.get("video", [])
-            if videos and len(videos) > 0:
-                media_url = videos[0].get("media_url_https") or videos[0].get("thumbnail_url") or videos[0].get("media_url")
+        videos = media.get("video", [])
+        if videos and len(videos) > 0:
+            return videos[0].get("media_url_https") or videos[0].get("thumbnail_url")
     
-    # Handle list format: [{"media_url_https": "..."}]
+    # Handle list format
     elif isinstance(media, list) and len(media) > 0:
-        media_url = media[0].get("media_url_https") or media[0].get("media_url")
+        return media[0].get("media_url_https") or media[0].get("media_url")
     
-    # Fallback: extended_entities.media[]
-    if not media_url:
-        extended = tweet.get("extended_entities")
-        if extended and isinstance(extended, dict):
-            ext_media = extended.get("media", [])
-            if ext_media and len(ext_media) > 0:
-                media_url = ext_media[0].get("media_url_https") or ext_media[0].get("media_url")
+    # Fallback: extended_entities
+    ext_media = tweet.get("extended_entities", {}).get("media", [])
+    if ext_media and len(ext_media) > 0:
+        return ext_media[0].get("media_url_https")
     
-    # Fallback: entities.media[]
-    if not media_url:
-        entities = tweet.get("entities")
-        if entities and isinstance(entities, dict):
-            ent_media = entities.get("media", [])
-            if ent_media and len(ent_media) > 0:
-                media_url = ent_media[0].get("media_url_https") or ent_media[0].get("media_url")
+    # Fallback: entities.media
+    ent_media = tweet.get("entities", {}).get("media", [])
+    if ent_media and len(ent_media) > 0:
+        return ent_media[0].get("media_url_https")
     
-    # Log for debugging
-    if media_url:
-        print(f"Found media: {media_url[:50]}...")
-    
-    return media_url
-
-
-def check_if_article(tweet):
-    """
-    Check if tweet is a Twitter article (long-form content)
-    """
-    text = tweet.get("text", "")
-    
-    # Articles often have these indicators
-    if "article" in text.lower():
-        return True
-    
-    # Check for card type
-    card = tweet.get("card", {})
-    if card:
-        card_type = card.get("type", "")
-        if "article" in card_type.lower():
-            return True
-    
-    # Check URL for article pattern
-    urls = tweet.get("entities", {}).get("urls", [])
-    for url in urls:
-        expanded = url.get("expanded_url", "")
-        if "/i/articles/" in expanded or "twitter.com/i/article" in expanded:
-            return True
-    
-    return False
+    return None
 
 
 def calculate_wrapped_stats(tweets, handle):
-    """
-    Calculate all the wrapped statistics from tweets
-    """
+    """Calculate wrapped statistics from tweets"""
     
     total_posts = len(tweets)
     total_views = 0
@@ -386,8 +244,11 @@ def calculate_wrapped_stats(tweets, handle):
         total_retweets += retweets
         total_replies += replies
         
-        tweet_url = f"https://twitter.com/{handle}/status/{tweet.get('tweet_id', tweet.get('id', ''))}"
-        media_url = tweet.get('extracted_media')
+        tweet_id = tweet.get('tweet_id') or tweet.get('id_str') or tweet.get('id', '')
+        tweet_url = f"https://twitter.com/{handle}/status/{tweet_id}"
+        
+        # Get media
+        media_url = tweet.get("extracted_media")
         
         # Track most viral (by views)
         if views > max_views:
@@ -417,11 +278,9 @@ def calculate_wrapped_stats(tweets, handle):
         created_at = tweet.get('created_at', '')
         if created_at:
             try:
-                # Parse Twitter date format
                 if 'T' in str(created_at):
                     post_date = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
                 else:
-                    # Format: "Wed Oct 10 20:19:24 +0000 2018"
                     post_date = datetime.strptime(created_at, '%a %b %d %H:%M:%S %z %Y')
                 
                 if first_post_date is None or post_date < first_post_date:
@@ -432,17 +291,16 @@ def calculate_wrapped_stats(tweets, handle):
                         "url": tweet_url
                     }
                 
-                # Count by month
                 month_key = post_date.strftime('%Y-%m')
                 posts_by_month[month_key] += 1
                 
             except Exception as e:
-                print(f"Date parse error: {e} - {created_at}")
+                print(f"Date parse error: {e}")
     
-    # Calculate posting streak (consecutive months)
+    # Calculate posting streak
     streak = calculate_streak(posts_by_month)
     
-    # Format first post date nicely
+    # Format first post date
     first_post_formatted = None
     if first_post_date:
         first_post_formatted = first_post_date.strftime('%B %d, %Y')
@@ -464,9 +322,7 @@ def calculate_wrapped_stats(tweets, handle):
 
 
 def calculate_streak(posts_by_month):
-    """
-    Calculate the longest consecutive month posting streak
-    """
+    """Calculate longest consecutive month posting streak"""
     if not posts_by_month:
         return 0
     
@@ -494,6 +350,7 @@ def calculate_streak(posts_by_month):
     return max_streak
 
 
+# Debug endpoints
 @app.route('/api/test', methods=['GET'])
 def test_api():
     """Test endpoint to verify API connection"""
@@ -505,47 +362,6 @@ def test_api():
         "key_set": bool(RAPIDAPI_KEY),
         "key_preview": RAPIDAPI_KEY[:10] + "..." if RAPIDAPI_KEY else None
     })
-
-
-@app.route('/api/ping', methods=['GET'])
-def ping():
-    """Simple ping to check if server is alive"""
-    return jsonify({"status": "ok", "message": "Server is running"})
-
-
-@app.route('/api/test-one-page', methods=['GET'])
-def test_one_page():
-    """Test fetching just 1 page to check if RapidAPI works"""
-    handle = request.args.get('handle', 'bulktrade')
-    
-    if not RAPIDAPI_KEY:
-        return jsonify({"error": "RAPIDAPI_KEY not set"}), 500
-    
-    headers = {
-        "x-rapidapi-key": RAPIDAPI_KEY,
-        "x-rapidapi-host": RAPIDAPI_HOST
-    }
-    
-    try:
-        url = f"https://{RAPIDAPI_HOST}/timeline.php"
-        response = requests.get(url, headers=headers, params={"screenname": handle}, timeout=10)
-        
-        if response.status_code == 429:
-            return jsonify({"error": "Rate limited - free tier exhausted", "code": 429})
-        
-        if response.status_code != 200:
-            return jsonify({"error": f"API returned {response.status_code}", "body": response.text[:200]})
-        
-        data = response.json()
-        tweets = data.get("timeline", [])
-        
-        return jsonify({
-            "success": True,
-            "tweets_found": len(tweets),
-            "first_tweet": tweets[0].get("text", "")[:100] if tweets else None
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)})
 
 
 @app.route('/api/test-user', methods=['GET'])
@@ -562,9 +378,8 @@ def test_user():
     }
     
     try:
-        # Get user info
         url = f"https://{RAPIDAPI_HOST}/screenname.php"
-        response = requests.get(url, headers=headers, params={"screenname": handle}, timeout=15)
+        response = requests.get(url, headers=headers, params={"screenname": handle}, timeout=10)
         
         if response.status_code != 200:
             return jsonify({"error": f"API returned {response.status_code}"}), 500
@@ -577,9 +392,9 @@ def test_user():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/api/debug-tweets', methods=['GET'])
-def debug_tweets():
-    """Debug endpoint to see raw tweet structure"""
+@app.route('/api/test-one-page', methods=['GET'])
+def test_one_page():
+    """Test fetching just one page of tweets"""
     handle = request.args.get('handle', 'momotavrrr')
     
     if not RAPIDAPI_KEY:
@@ -592,7 +407,10 @@ def debug_tweets():
     
     try:
         url = f"https://{RAPIDAPI_HOST}/timeline.php"
-        response = requests.get(url, headers=headers, params={"screenname": handle}, timeout=30)
+        response = requests.get(url, headers=headers, params={"screenname": handle}, timeout=10)
+        
+        if response.status_code == 429:
+            return jsonify({"error": "Rate limited! Upgrade RapidAPI plan."}), 429
         
         if response.status_code != 200:
             return jsonify({"error": f"API returned {response.status_code}"}), 500
@@ -600,23 +418,10 @@ def debug_tweets():
         data = response.json()
         timeline = data.get("timeline", [])
         
-        # Find tweets with media
-        tweets_with_media = []
-        for tweet in timeline[:10]:
-            has_media = bool(tweet.get("media")) or bool(tweet.get("extended_entities", {}).get("media"))
-            tweets_with_media.append({
-                "text": tweet.get("text", "")[:100],
-                "has_media": has_media,
-                "media_field": tweet.get("media"),
-                "extended_entities": tweet.get("extended_entities"),
-                "entities": tweet.get("entities"),
-                "all_keys": list(tweet.keys())
-            })
-        
         return jsonify({
             "success": True,
-            "total_tweets": len(timeline),
-            "sample_tweets": tweets_with_media
+            "tweets_found": len(timeline),
+            "first_tweet": timeline[0].get("text", "")[:100] if timeline else None
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -624,15 +429,38 @@ def debug_tweets():
 
 @app.route('/api/debug-bulk', methods=['GET'])
 def debug_bulk():
-    """Debug endpoint to see which posts are detected as BULK-related"""
+    """Debug endpoint to check bulk detection"""
     handle = request.args.get('handle', 'momotavrrr')
     
     if not RAPIDAPI_KEY:
         return jsonify({"error": "RAPIDAPI_KEY not set"}), 500
     
     try:
-        # Fetch tweets
-        tweets = fetch_user_tweets(handle)
+        # Fetch 2 pages only for debug
+        all_tweets = []
+        cursor = None
+        
+        headers = {
+            "x-rapidapi-key": RAPIDAPI_KEY,
+            "x-rapidapi-host": RAPIDAPI_HOST
+        }
+        
+        for page in range(2):
+            url = f"https://{RAPIDAPI_HOST}/timeline.php"
+            params = {"screenname": handle}
+            if cursor:
+                params["cursor"] = cursor
+            
+            response = requests.get(url, headers=headers, params=params, timeout=10)
+            if response.status_code != 200:
+                break
+            
+            data = response.json()
+            timeline = data.get("timeline", [])
+            all_tweets.extend(timeline)
+            cursor = data.get("next_cursor")
+            if not cursor:
+                break
         
         # Context keywords
         context_keywords = [
@@ -644,90 +472,58 @@ def debug_bulk():
         
         # Analyze each tweet
         results = []
-        for tweet in tweets[:50]:
+        bulk_count = 0
+        
+        for tweet in all_tweets:
             text = tweet.get("text", "")
             text_lower = text.lower()
             
-            # Check @bulktrade
-            has_at_bulktrade = "@bulktrade" in text_lower
-            
-            # Check "bulk" + context
+            has_bulktrade = "@bulktrade" in text_lower
             has_bulk_word = "bulk" in text_lower
-            matched_context = None
-            if has_bulk_word and not has_at_bulktrade:
+            
+            # Check user mentions
+            user_mention = False
+            user_mentions = tweet.get("entities", {}).get("user_mentions", [])
+            for mention in user_mentions:
+                if mention.get("screen_name", "").lower() == "bulktrade":
+                    user_mention = True
+                    break
+            
+            # Find context keyword
+            found_context = None
+            if has_bulk_word:
                 for kw in context_keywords:
                     if kw in text_lower:
-                        matched_context = kw
+                        found_context = kw
                         break
             
-            # Check user_mentions
-            entities = tweet.get("entities", {})
-            user_mentions = entities.get("user_mentions", [])
-            mention_names = [m.get("screen_name", "").lower() for m in user_mentions]
-            mentions_has_bulk = "bulktrade" in mention_names
+            # Determine if bulk related
+            is_bulk = has_bulktrade or user_mention or (has_bulk_word and found_context)
             
-            # Determine if BULK related
-            is_bulk = has_at_bulktrade or (has_bulk_word and matched_context) or mentions_has_bulk
+            if is_bulk:
+                bulk_count += 1
             
             results.append({
                 "text_preview": text[:120] + "..." if len(text) > 120 else text,
+                "is_bulk_related": is_bulk if not found_context else found_context,
+                "media_url": extract_media_url(tweet),
                 "detected_by": {
-                    "@bulktrade_in_text": has_at_bulktrade,
+                    "@bulktrade_in_text": has_bulktrade,
                     "bulk_word": has_bulk_word,
-                    "context_keyword": matched_context,
-                    "user_mention": mentions_has_bulk
-                },
-                "is_bulk_related": is_bulk,
-                "media_url": extract_media_url(tweet)
+                    "context_keyword": found_context,
+                    "user_mention": user_mention
+                }
             })
-        
-        bulk_count = sum(1 for r in results if r["is_bulk_related"])
         
         return jsonify({
             "success": True,
             "handle": handle,
-            "total_scanned": len(results),
+            "total_scanned": len(all_tweets),
             "bulk_related_count": bulk_count,
             "context_keywords": context_keywords,
             "tweets": results
         })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/api/debug-media', methods=['GET'])
-def debug_media():
-    """Debug endpoint to check media extraction"""
-    handle = request.args.get('handle', 'momotavrrr')
-    
-    if not RAPIDAPI_KEY:
-        return jsonify({"error": "RAPIDAPI_KEY not set"}), 500
-    
-    try:
-        tweets = fetch_user_tweets(handle)
         
-        results = []
-        for tweet in tweets[:20]:
-            text = tweet.get("text", "")[:80]
-            raw_media = tweet.get("media")
-            extracted = extract_media_url(tweet)
-            
-            results.append({
-                "text": text,
-                "has_raw_media": raw_media is not None and raw_media != [],
-                "raw_media_type": type(raw_media).__name__,
-                "extracted_url": extracted
-            })
-        
-        with_media = sum(1 for r in results if r["extracted_url"])
-        
-        return jsonify({
-            "success": True,
-            "handle": handle,
-            "tweets_checked": len(results),
-            "tweets_with_media": with_media,
-            "results": results
-        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
