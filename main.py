@@ -72,7 +72,7 @@ def fetch_user_tweets(handle):
     """
     all_tweets = []
     cursor = None
-    max_pages = 10  # ~200 tweets - fast response
+    max_pages = 5  # ~100 tweets - fits within Railway 30s timeout
     
     headers = {
         "x-rapidapi-key": RAPIDAPI_KEY,
