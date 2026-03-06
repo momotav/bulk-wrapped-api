@@ -72,7 +72,7 @@ def fetch_user_tweets(handle):
     """
     all_tweets = []
     cursor = None
-    max_pages = 30  # ~600 tweets - good coverage for active users
+    max_pages = 20  # ~400 tweets - balanced for speed and coverage
     
     headers = {
         "x-rapidapi-key": RAPIDAPI_KEY,
@@ -88,7 +88,14 @@ def fetch_user_tweets(handle):
         
         print(f"Fetching page {page + 1} for @{handle}...")
         
-        response = requests.get(url, headers=headers, params=params, timeout=30)
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=15)
+        except requests.exceptions.Timeout:
+            print(f"Timeout on page {page + 1}, stopping early")
+            break
+        except Exception as e:
+            print(f"Error on page {page + 1}: {e}")
+            break
         
         if response.status_code != 200:
             print(f"API error: {response.status_code} - {response.text}")
