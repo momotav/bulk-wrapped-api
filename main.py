@@ -513,6 +513,41 @@ def ping():
     return jsonify({"status": "ok", "message": "Server is running"})
 
 
+@app.route('/api/test-one-page', methods=['GET'])
+def test_one_page():
+    """Test fetching just 1 page to check if RapidAPI works"""
+    handle = request.args.get('handle', 'bulktrade')
+    
+    if not RAPIDAPI_KEY:
+        return jsonify({"error": "RAPIDAPI_KEY not set"}), 500
+    
+    headers = {
+        "x-rapidapi-key": RAPIDAPI_KEY,
+        "x-rapidapi-host": RAPIDAPI_HOST
+    }
+    
+    try:
+        url = f"https://{RAPIDAPI_HOST}/timeline.php"
+        response = requests.get(url, headers=headers, params={"screenname": handle}, timeout=10)
+        
+        if response.status_code == 429:
+            return jsonify({"error": "Rate limited - free tier exhausted", "code": 429})
+        
+        if response.status_code != 200:
+            return jsonify({"error": f"API returned {response.status_code}", "body": response.text[:200]})
+        
+        data = response.json()
+        tweets = data.get("timeline", [])
+        
+        return jsonify({
+            "success": True,
+            "tweets_found": len(tweets),
+            "first_tweet": tweets[0].get("text", "")[:100] if tweets else None
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
 @app.route('/api/test-user', methods=['GET'])
 def test_user():
     """Test fetching a user's info"""
