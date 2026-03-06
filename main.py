@@ -72,7 +72,7 @@ def fetch_user_tweets(handle):
     """
     all_tweets = []
     cursor = None
-    max_pages = 5  # Limit to 5 pages (~100 tweets) for speed
+    max_pages = 30  # ~600 tweets - good coverage for active users
     
     headers = {
         "x-rapidapi-key": RAPIDAPI_KEY,
@@ -143,8 +143,6 @@ def filter_bulk_tweets(tweets):
         "@rizzy_sol",
         "@glowburger",
         "@junbug_sol"
-        "testnet"
-        "mainnet"
     ]
     
     for tweet in tweets:
@@ -278,39 +276,45 @@ def extract_media_url(tweet):
     """
     media_url = None
     
-    # Primary location: media.photo[]
-    media = tweet.get("media", {})
+    # Primary location: media.photo[] or media.video[]
+    media = tweet.get("media")
     
+    # Handle dict format: {"photo": [...], "video": [...]}
     if isinstance(media, dict):
         # Check photo array
         photos = media.get("photo", [])
         if photos and len(photos) > 0:
-            media_url = photos[0].get("media_url_https")
+            media_url = photos[0].get("media_url_https") or photos[0].get("media_url")
         
         # Check video array
         if not media_url:
             videos = media.get("video", [])
             if videos and len(videos) > 0:
-                media_url = videos[0].get("media_url_https") or videos[0].get("thumbnail_url")
+                media_url = videos[0].get("media_url_https") or videos[0].get("thumbnail_url") or videos[0].get("media_url")
     
+    # Handle list format: [{"media_url_https": "..."}]
     elif isinstance(media, list) and len(media) > 0:
-        media_url = media[0].get("media_url_https")
+        media_url = media[0].get("media_url_https") or media[0].get("media_url")
     
-    # Fallback: extended_entities
+    # Fallback: extended_entities.media[]
     if not media_url:
-        extended = tweet.get("extended_entities", {})
-        if extended:
+        extended = tweet.get("extended_entities")
+        if extended and isinstance(extended, dict):
             ext_media = extended.get("media", [])
             if ext_media and len(ext_media) > 0:
-                media_url = ext_media[0].get("media_url_https")
+                media_url = ext_media[0].get("media_url_https") or ext_media[0].get("media_url")
     
-    # Fallback: entities.media
+    # Fallback: entities.media[]
     if not media_url:
-        entities = tweet.get("entities", {})
-        if entities:
+        entities = tweet.get("entities")
+        if entities and isinstance(entities, dict):
             ent_media = entities.get("media", [])
             if ent_media and len(ent_media) > 0:
-                media_url = ent_media[0].get("media_url_https")
+                media_url = ent_media[0].get("media_url_https") or ent_media[0].get("media_url")
+    
+    # Log for debugging
+    if media_url:
+        print(f"Found media: {media_url[:50]}...")
     
     return media_url
 
@@ -638,6 +642,43 @@ def debug_bulk():
             "bulk_related_count": bulk_count,
             "context_keywords": context_keywords,
             "tweets": results
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/debug-media', methods=['GET'])
+def debug_media():
+    """Debug endpoint to check media extraction"""
+    handle = request.args.get('handle', 'momotavrrr')
+    
+    if not RAPIDAPI_KEY:
+        return jsonify({"error": "RAPIDAPI_KEY not set"}), 500
+    
+    try:
+        tweets = fetch_user_tweets(handle)
+        
+        results = []
+        for tweet in tweets[:20]:
+            text = tweet.get("text", "")[:80]
+            raw_media = tweet.get("media")
+            extracted = extract_media_url(tweet)
+            
+            results.append({
+                "text": text,
+                "has_raw_media": raw_media is not None and raw_media != [],
+                "raw_media_type": type(raw_media).__name__,
+                "extracted_url": extracted
+            })
+        
+        with_media = sum(1 for r in results if r["extracted_url"])
+        
+        return jsonify({
+            "success": True,
+            "handle": handle,
+            "tweets_checked": len(results),
+            "tweets_with_media": with_media,
+            "results": results
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
