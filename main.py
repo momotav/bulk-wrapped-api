@@ -72,7 +72,7 @@ def fetch_user_tweets(handle):
     """
     all_tweets = []
     cursor = None
-    max_pages = 20  # ~400 tweets - balanced for speed and coverage
+    max_pages = 10  # ~200 tweets - fast response
     
     headers = {
         "x-rapidapi-key": RAPIDAPI_KEY,
@@ -89,7 +89,7 @@ def fetch_user_tweets(handle):
         print(f"Fetching page {page + 1} for @{handle}...")
         
         try:
-            response = requests.get(url, headers=headers, params=params, timeout=15)
+            response = requests.get(url, headers=headers, params=params, timeout=10)
         except requests.exceptions.Timeout:
             print(f"Timeout on page {page + 1}, stopping early")
             break
@@ -505,6 +505,12 @@ def test_api():
         "key_set": bool(RAPIDAPI_KEY),
         "key_preview": RAPIDAPI_KEY[:10] + "..." if RAPIDAPI_KEY else None
     })
+
+
+@app.route('/api/ping', methods=['GET'])
+def ping():
+    """Simple ping to check if server is alive"""
+    return jsonify({"status": "ok", "message": "Server is running"})
 
 
 @app.route('/api/test-user', methods=['GET'])
