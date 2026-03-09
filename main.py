@@ -47,6 +47,9 @@ def get_wrapped():
         return jsonify({"error": "API not configured"}), 500
     
     try:
+        # Fetch user profile (for PFP)
+        user_info = fetch_user_profile(handle)
+        
         # Fetch user's tweets (FAST: 3 pages, 8s timeout)
         tweets = fetch_user_tweets_fast(handle)
         
@@ -64,17 +67,66 @@ def get_wrapped():
         # Calculate wrapped stats
         stats = calculate_wrapped_stats(bulk_tweets, handle)
         
+        # Add user profile info to stats
+        stats["profile_image"] = user_info.get("profile_image") if user_info else None
+        stats["display_name"] = user_info.get("name") if user_info else handle
+        
         return jsonify({
             "success": True,
             "handle": handle,
             "total_tweets_scanned": len(tweets),
             "bulk_tweets_found": len(bulk_tweets),
-            "stats": stats
+            "stats": stats,
+            "user": user_info
         })
         
     except Exception as e:
         print(f"Error fetching wrapped: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+def fetch_user_profile(handle):
+    """Fetch user's profile info including PFP"""
+    headers = {
+        "x-rapidapi-key": RAPIDAPI_KEY,
+        "x-rapidapi-host": RAPIDAPI_HOST
+    }
+    
+    try:
+        url = f"https://{RAPIDAPI_HOST}/screenname.php"
+        response = requests.get(url, headers=headers, params={"screenname": handle}, timeout=5)
+        
+        if response.status_code != 200:
+            print(f"Failed to fetch profile: {response.status_code}")
+            return None
+        
+        data = response.json()
+        
+        # Extract profile image - try different possible fields
+        profile_image = (
+            data.get("profile_image_url_https") or
+            data.get("profile_image_url") or
+            data.get("avatar") or
+            data.get("profile_pic_url") or
+            data.get("profile_image")
+        )
+        
+        # Get higher resolution image (remove _normal suffix)
+        if profile_image and "_normal" in profile_image:
+            profile_image = profile_image.replace("_normal", "_400x400")
+        
+        return {
+            "name": data.get("name") or handle,
+            "screen_name": data.get("screen_name") or handle,
+            "profile_image": profile_image,
+            "followers": data.get("followers_count") or data.get("followers") or 0,
+            "following": data.get("friends_count") or data.get("following") or 0,
+            "bio": data.get("description") or data.get("bio") or ""
+        }
+        
+    except Exception as e:
+        print(f"Error fetching profile: {e}")
+        return None
 
 
 def fetch_user_tweets_fast(handle):
