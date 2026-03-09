@@ -131,12 +131,12 @@ def fetch_user_profile(handle):
 
 def fetch_user_tweets_fast(handle):
     """
-    FAST version: Only 3 pages, 8s timeout per request
-    Total max time: ~24 seconds (fits in Railway 30s limit)
+    FULL version: 50 pages (~1000 tweets)
+    Railway supports 5+ min timeout, RapidAPI upgraded to handle volume
     """
     all_tweets = []
     cursor = None
-    max_pages = 3  # REDUCED from 5 to 3
+    max_pages = 50  # 50 pages × 20 tweets = ~1000 tweets
     
     headers = {
         "x-rapidapi-key": RAPIDAPI_KEY,
@@ -150,10 +150,14 @@ def fetch_user_tweets_fast(handle):
         if cursor:
             params["cursor"] = cursor
         
-        print(f"Fetching page {page + 1} for @{handle}...")
+        print(f"Fetching page {page + 1}/{max_pages} for @{handle}... ({len(all_tweets)} tweets so far)")
         
         try:
-            response = requests.get(url, headers=headers, params=params, timeout=8)  # 8s timeout
+            response = requests.get(url, headers=headers, params=params, timeout=15)
+            
+            if response.status_code == 429:
+                print(f"Rate limited on page {page + 1}, using what we have")
+                break
             
             if response.status_code != 200:
                 print(f"API error: {response.status_code}")
@@ -165,16 +169,18 @@ def fetch_user_tweets_fast(handle):
             timeline = data.get("timeline", [])
             
             if not timeline:
+                print(f"No more tweets on page {page + 1}")
                 break
             
             all_tweets.extend(timeline)
             cursor = data.get("next_cursor")
             
             if not cursor:
+                print(f"No more pages after page {page + 1}")
                 break
                 
         except requests.exceptions.Timeout:
-            print(f"Timeout on page {page + 1}, using what we have")
+            print(f"Timeout on page {page + 1}, using what we have ({len(all_tweets)} tweets)")
             break
         except Exception as e:
             print(f"Error on page {page + 1}: {e}")
@@ -182,7 +188,7 @@ def fetch_user_tweets_fast(handle):
                 raise
             break
     
-    print(f"Total tweets fetched: {len(all_tweets)}")
+    print(f"✅ Total tweets fetched: {len(all_tweets)}")
     return all_tweets
 
 
