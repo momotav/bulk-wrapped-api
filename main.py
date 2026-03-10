@@ -1103,8 +1103,12 @@ def debug_single_tweet():
         # Get all keys
         all_keys = list(data.keys()) if isinstance(data, dict) else []
         
+        # Get the FULL article field - this might have the content!
+        article_field = data.get("article")
+        initial_tweets = data.get("initial_tweets")
+        
         # Try to extract article content if there's an article URL
-        article_content = None
+        article_content_fetched = None
         article_urls = []
         
         urls = data.get("entities", {}).get("urls", [])
@@ -1115,21 +1119,20 @@ def debug_single_tweet():
                 # Try to fetch it
                 content = fetch_article_content(expanded)
                 if content:
-                    article_content = content
-        
-        # Also check for note_tweet which might have article content
-        note_tweet = data.get("note_tweet")
+                    article_content_fetched = content
         
         return jsonify({
             "tweet_id": tweet_id,
             "all_keys": all_keys,
             "text": data.get("text", "")[:500],
-            "full_text": data.get("full_text", "")[:500] if data.get("full_text") else None,
-            "note_tweet": note_tweet,
+            "full_text": data.get("full_text"),
+            "display_text": data.get("display_text"),
+            "note_tweet": data.get("note_tweet"),
             "entities_urls": urls,
             "article_urls_found": article_urls,
-            "article_content_fetched": article_content[:1000] if article_content else None,
-            "raw_data_sample": {k: str(v)[:200] for k, v in list(data.items())[:15]} if isinstance(data, dict) else str(data)[:1000]
+            "article_field_from_api": article_field,  # FULL article data from RapidAPI
+            "initial_tweets": initial_tweets,  # Thread/article initial content
+            "article_content_fetched": article_content_fetched[:1000] if article_content_fetched else None,
         })
         
     except Exception as e:
