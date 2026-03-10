@@ -383,9 +383,31 @@ def check_and_fetch_article(tweet):
 def fetch_article_content(article_url):
     """
     Fetch Twitter article page and extract the text content
+    Tries multiple methods since Twitter articles are JS-rendered
     """
+    content = None
+    
+    # Method 1: Try direct fetch (might work for some articles)
+    content = fetch_article_direct(article_url)
+    if content and len(content) > 100:
+        return content
+    
+    # Method 2: Try using a reader service (jina.ai)
+    content = fetch_article_via_reader(article_url)
+    if content and len(content) > 100:
+        return content
+    
+    # Method 3: Try nitter (alternative Twitter frontend)
+    content = fetch_article_via_nitter(article_url)
+    if content and len(content) > 100:
+        return content
+    
+    return content
+
+
+def fetch_article_direct(article_url):
+    """Direct fetch attempt"""
     try:
-        # Add headers to look like a browser
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
@@ -397,62 +419,112 @@ def fetch_article_content(article_url):
         if response.status_code != 200:
             return None
         
-        html = response.text
+        html_content = response.text
+        return extract_text_from_html(html_content)
         
-        # Extract text content from HTML
+    except Exception as e:
+        print(f"Direct fetch failed: {e}")
+        return None
+
+
+def fetch_article_via_reader(article_url):
+    """Use jina.ai reader to extract content from JS-rendered pages"""
+    try:
+        reader_url = f"https://r.jina.ai/{article_url}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (compatible; BulkWrapped/1.0)",
+        }
+        
+        response = requests.get(reader_url, headers=headers, timeout=15)
+        
+        if response.status_code == 200:
+            # Jina returns markdown-formatted text
+            text = response.text
+            if len(text) > 50:
+                return text[:5000]  # Limit size
+        
+        return None
+        
+    except Exception as e:
+        print(f"Reader fetch failed: {e}")
+        return None
+
+
+def fetch_article_via_nitter(article_url):
+    """Try nitter instance for article content"""
+    try:
+        # Convert x.com/twitter.com URL to nitter
+        # Articles might not work on nitter but worth trying
+        nitter_url = article_url.replace("x.com", "nitter.net").replace("twitter.com", "nitter.net")
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        }
+        
+        response = requests.get(nitter_url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            return extract_text_from_html(response.text)
+        
+        return None
+        
+    except Exception as e:
+        print(f"Nitter fetch failed: {e}")
+        return None
+
+
+def extract_text_from_html(html_content):
+    """Extract readable text from HTML"""
+    try:
         # Remove script and style tags
-        html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
-        html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        html_content = re.sub(r'<script[^>]*>.*?</script>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        html_content = re.sub(r'<style[^>]*>.*?</style>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
         
-        # Try to find article content in common patterns
-        # Twitter articles often have the content in specific meta tags or JSON
+        text_parts = []
         
         # Check og:description meta tag
-        og_match = re.search(r'<meta[^>]*property=["\']og:description["\'][^>]*content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+        og_match = re.search(r'<meta[^>]*property=["\']og:description["\'][^>]*content=["\']([^"\']+)["\']', html_content, re.IGNORECASE)
         if og_match:
-            content = og_match.group(1)
-            if len(content) > 50:
-                return html_decode(content)
+            text_parts.append(og_match.group(1))
         
         # Check twitter:description
-        tw_match = re.search(r'<meta[^>]*name=["\']twitter:description["\'][^>]*content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+        tw_match = re.search(r'<meta[^>]*name=["\']twitter:description["\'][^>]*content=["\']([^"\']+)["\']', html_content, re.IGNORECASE)
         if tw_match:
-            content = tw_match.group(1)
-            if len(content) > 50:
-                return html_decode(content)
+            text_parts.append(tw_match.group(1))
         
         # Look for article title
-        title_match = re.search(r'<meta[^>]*property=["\']og:title["\'][^>]*content=["\']([^"\']+)["\']', html, re.IGNORECASE)
-        title = title_match.group(1) if title_match else ""
+        title_match = re.search(r'<meta[^>]*property=["\']og:title["\'][^>]*content=["\']([^"\']+)["\']', html_content, re.IGNORECASE)
+        if title_match:
+            text_parts.append(title_match.group(1))
         
         # Try to extract from JSON-LD structured data
-        json_ld_match = re.search(r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
+        json_ld_match = re.search(r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html_content, re.DOTALL | re.IGNORECASE)
         if json_ld_match:
             try:
                 json_data = json.loads(json_ld_match.group(1))
                 if isinstance(json_data, dict):
                     article_body = json_data.get("articleBody") or json_data.get("text") or json_data.get("description", "")
                     if article_body:
-                        return html_decode(title + " " + article_body)
+                        text_parts.append(article_body)
             except:
                 pass
         
         # Fallback: extract all text from body
-        body_match = re.search(r'<body[^>]*>(.*?)</body>', html, re.DOTALL | re.IGNORECASE)
+        body_match = re.search(r'<body[^>]*>(.*?)</body>', html_content, re.DOTALL | re.IGNORECASE)
         if body_match:
             body = body_match.group(1)
             # Remove all HTML tags
             text = re.sub(r'<[^>]+>', ' ', body)
             # Clean up whitespace
             text = re.sub(r'\s+', ' ', text).strip()
-            # Return first 2000 chars (enough to find keywords)
             if len(text) > 100:
-                return html_decode(title + " " + text[:2000])
+                text_parts.append(text[:2000])
         
-        return html_decode(title) if title else None
+        combined = " ".join(filter(None, text_parts))
+        return html.unescape(combined) if combined else None
         
     except Exception as e:
-        print(f"Error fetching article {article_url}: {e}")
+        print(f"HTML extraction failed: {e}")
         return None
 
 
@@ -995,6 +1067,71 @@ def debug_article():
             "content": content[:2000] if content else None,
             "content_length": len(content) if content else 0
         })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/debug-tweet', methods=['GET'])
+def debug_single_tweet():
+    """
+    Debug endpoint to fetch a specific tweet by ID and see all its data
+    """
+    tweet_id = request.args.get('id', '')
+    
+    if not tweet_id:
+        return jsonify({"error": "Provide ?id=<tweet_id>"}), 400
+    
+    # Extract tweet ID from URL if full URL provided
+    if "status/" in tweet_id:
+        tweet_id = tweet_id.split("status/")[-1].split("?")[0].split("/")[0]
+    
+    headers = {
+        "x-rapidapi-key": RAPIDAPI_KEY,
+        "x-rapidapi-host": RAPIDAPI_HOST
+    }
+    
+    try:
+        # Try to get tweet details
+        url = f"https://{RAPIDAPI_HOST}/tweet.php"
+        response = requests.get(url, headers=headers, params={"id": tweet_id}, timeout=15)
+        
+        if response.status_code != 200:
+            return jsonify({"error": f"Failed to fetch tweet {tweet_id}", "status": response.status_code}), 400
+        
+        data = response.json()
+        
+        # Get all keys
+        all_keys = list(data.keys()) if isinstance(data, dict) else []
+        
+        # Try to extract article content if there's an article URL
+        article_content = None
+        article_urls = []
+        
+        urls = data.get("entities", {}).get("urls", [])
+        for url_obj in urls:
+            expanded = url_obj.get("expanded_url", "")
+            if "/i/article/" in expanded or "/article/" in expanded:
+                article_urls.append(expanded)
+                # Try to fetch it
+                content = fetch_article_content(expanded)
+                if content:
+                    article_content = content
+        
+        # Also check for note_tweet which might have article content
+        note_tweet = data.get("note_tweet")
+        
+        return jsonify({
+            "tweet_id": tweet_id,
+            "all_keys": all_keys,
+            "text": data.get("text", "")[:500],
+            "full_text": data.get("full_text", "")[:500] if data.get("full_text") else None,
+            "note_tweet": note_tweet,
+            "entities_urls": urls,
+            "article_urls_found": article_urls,
+            "article_content_fetched": article_content[:1000] if article_content else None,
+            "raw_data_sample": {k: str(v)[:200] for k, v in list(data.items())[:15]} if isinstance(data, dict) else str(data)[:1000]
+        })
+        
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
