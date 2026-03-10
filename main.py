@@ -290,7 +290,8 @@ def filter_bulk_tweets(tweets):
     2. "bulk" or "gbulk" + context keyword → count it
     3. "gbulk" alone → count it (gBULK token)
     4. Check quoted tweets, articles, notes for keywords
-    5. For article URLs - fetch and check article content
+    
+    Note: Article content is extracted from tweet.article.full_text by get_full_tweet_text()
     """
     bulk_tweets = []
     
@@ -303,14 +304,8 @@ def filter_bulk_tweets(tweets):
     ]
     
     for tweet in tweets:
-        # Get ALL possible text content from the tweet
+        # Get ALL possible text content from the tweet (includes article.full_text)
         all_text = get_full_tweet_text(tweet)
-        
-        # Check if tweet has article URL - if so, fetch article content
-        article_text = check_and_fetch_article(tweet)
-        if article_text:
-            all_text += " " + article_text
-        
         text_lower = all_text.lower()
         is_bulk_related = False
         
@@ -348,9 +343,6 @@ def filter_bulk_tweets(tweets):
         
         if is_bulk_related:
             tweet["extracted_media"] = extract_media_url(tweet)
-            # Store article text if we fetched it (for display later)
-            if article_text:
-                tweet["article_content"] = article_text[:500]
             bulk_tweets.append(tweet)
     
     return bulk_tweets
@@ -585,7 +577,9 @@ def get_full_tweet_text(tweet):
     # Article content (multiple possible structures)
     article = tweet.get("article") or tweet.get("twitter_article") or {}
     if isinstance(article, dict):
+        text_parts.append(article.get("full_text", ""))  # THIS IS THE KEY ONE!
         text_parts.append(article.get("title", ""))
+        text_parts.append(article.get("preview_text", ""))
         text_parts.append(article.get("text", ""))
         text_parts.append(article.get("content", ""))
         text_parts.append(article.get("body", ""))
@@ -593,6 +587,7 @@ def get_full_tweet_text(tweet):
         # Article results structure
         results = article.get("article_results", {}).get("result", {})
         if isinstance(results, dict):
+            text_parts.append(results.get("full_text", ""))
             text_parts.append(results.get("title", ""))
             text_parts.append(results.get("text", ""))
     
