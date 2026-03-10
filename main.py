@@ -5,8 +5,10 @@ BULK Wrapped API - Full Version with Progress Streaming
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 import os
+import re
 import requests
 import json
+import html
 from datetime import datetime, timedelta
 from collections import defaultdict
 
@@ -288,6 +290,7 @@ def filter_bulk_tweets(tweets):
     2. "bulk" or "gbulk" + context keyword → count it
     3. "gbulk" alone → count it (gBULK token)
     4. Check quoted tweets, articles, notes for keywords
+    5. For article URLs - fetch and check article content
     """
     bulk_tweets = []
     
@@ -302,6 +305,12 @@ def filter_bulk_tweets(tweets):
     for tweet in tweets:
         # Get ALL possible text content from the tweet
         all_text = get_full_tweet_text(tweet)
+        
+        # Check if tweet has article URL - if so, fetch article content
+        article_text = check_and_fetch_article(tweet)
+        if article_text:
+            all_text += " " + article_text
+        
         text_lower = all_text.lower()
         is_bulk_related = False
         
@@ -339,7 +348,120 @@ def filter_bulk_tweets(tweets):
         
         if is_bulk_related:
             tweet["extracted_media"] = extract_media_url(tweet)
+            # Store article text if we fetched it (for display later)
+            if article_text:
+                tweet["article_content"] = article_text[:500]
             bulk_tweets.append(tweet)
+    
+    return bulk_tweets
+
+
+def check_and_fetch_article(tweet):
+    """
+    Check if tweet contains an article URL and fetch its content
+    Article URLs look like: x.com/i/article/... or twitter.com/i/article/...
+    """
+    # Get all URLs from the tweet
+    urls = tweet.get("entities", {}).get("urls", [])
+    
+    for url_obj in urls:
+        expanded_url = url_obj.get("expanded_url", "") or url_obj.get("url", "")
+        
+        # Check if it's an article URL
+        if "/i/article/" in expanded_url or "/article/" in expanded_url:
+            try:
+                article_content = fetch_article_content(expanded_url)
+                if article_content:
+                    return article_content
+            except Exception as e:
+                print(f"Failed to fetch article: {e}")
+                continue
+    
+    return None
+
+
+def fetch_article_content(article_url):
+    """
+    Fetch Twitter article page and extract the text content
+    """
+    try:
+        # Add headers to look like a browser
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+        }
+        
+        response = requests.get(article_url, headers=headers, timeout=10, allow_redirects=True)
+        
+        if response.status_code != 200:
+            return None
+        
+        html = response.text
+        
+        # Extract text content from HTML
+        # Remove script and style tags
+        html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Try to find article content in common patterns
+        # Twitter articles often have the content in specific meta tags or JSON
+        
+        # Check og:description meta tag
+        og_match = re.search(r'<meta[^>]*property=["\']og:description["\'][^>]*content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+        if og_match:
+            content = og_match.group(1)
+            if len(content) > 50:
+                return html_decode(content)
+        
+        # Check twitter:description
+        tw_match = re.search(r'<meta[^>]*name=["\']twitter:description["\'][^>]*content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+        if tw_match:
+            content = tw_match.group(1)
+            if len(content) > 50:
+                return html_decode(content)
+        
+        # Look for article title
+        title_match = re.search(r'<meta[^>]*property=["\']og:title["\'][^>]*content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+        title = title_match.group(1) if title_match else ""
+        
+        # Try to extract from JSON-LD structured data
+        json_ld_match = re.search(r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
+        if json_ld_match:
+            try:
+                json_data = json.loads(json_ld_match.group(1))
+                if isinstance(json_data, dict):
+                    article_body = json_data.get("articleBody") or json_data.get("text") or json_data.get("description", "")
+                    if article_body:
+                        return html_decode(title + " " + article_body)
+            except:
+                pass
+        
+        # Fallback: extract all text from body
+        body_match = re.search(r'<body[^>]*>(.*?)</body>', html, re.DOTALL | re.IGNORECASE)
+        if body_match:
+            body = body_match.group(1)
+            # Remove all HTML tags
+            text = re.sub(r'<[^>]+>', ' ', body)
+            # Clean up whitespace
+            text = re.sub(r'\s+', ' ', text).strip()
+            # Return first 2000 chars (enough to find keywords)
+            if len(text) > 100:
+                return html_decode(title + " " + text[:2000])
+        
+        return html_decode(title) if title else None
+        
+    except Exception as e:
+        print(f"Error fetching article {article_url}: {e}")
+        return None
+
+
+def html_decode(text):
+    """Decode HTML entities"""
+    try:
+        return html.unescape(text)
+    except:
+        return text
     
     return bulk_tweets
 
@@ -832,12 +954,16 @@ def debug_tweets():
             # Check what we extract with our function
             full_text_extracted = get_full_tweet_text(tweet)
             
+            # Check for article URLs and try to fetch
+            article_content = check_and_fetch_article(tweet)
+            
             debug_info.append({
                 "index": i,
                 "all_keys": all_keys,
                 "extracted_fields": extracted,
                 "full_text_combined": full_text_extracted[:500],
-                "is_bulk_related": "@bulktrade" in full_text_extracted.lower() or "bulk" in full_text_extracted.lower()
+                "article_content_fetched": article_content[:500] if article_content else None,
+                "is_bulk_related": "@bulktrade" in (full_text_extracted + (article_content or "")).lower() or "bulk" in (full_text_extracted + (article_content or "")).lower()
             })
         
         return jsonify({
@@ -847,6 +973,28 @@ def debug_tweets():
             "tweets": debug_info
         })
         
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/debug-article', methods=['GET'])
+def debug_article():
+    """
+    Debug endpoint to test fetching a specific article URL
+    """
+    article_url = request.args.get('url', '')
+    
+    if not article_url:
+        return jsonify({"error": "Provide ?url=<article_url>"}), 400
+    
+    try:
+        content = fetch_article_content(article_url)
+        return jsonify({
+            "url": article_url,
+            "content_found": content is not None,
+            "content": content[:2000] if content else None,
+            "content_length": len(content) if content else 0
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
