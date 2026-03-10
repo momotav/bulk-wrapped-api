@@ -287,6 +287,7 @@ def filter_bulk_tweets(tweets):
     1. @bulktrade in text → count it
     2. "bulk" or "gbulk" + context keyword → count it
     3. "gbulk" alone → count it (gBULK token)
+    4. Check quoted tweets, articles, notes for keywords
     """
     bulk_tweets = []
     
@@ -295,12 +296,13 @@ def filter_bulk_tweets(tweets):
         "liquidation", "decentralized", "trading", "community",
         "role", "og", "contributor", "@kdotcrypto", "@rizzy_sol",
         "@glowburger", "@junbug_sol", "bulkgram", "testnet",
-        "airdrop", "token", "sol", "solana", "wrapped", "claim", "bust"
+        "airdrop", "token", "sol", "solana", "wrapped", "claim"
     ]
     
     for tweet in tweets:
-        text = tweet.get("text", "")
-        text_lower = text.lower()
+        # Get ALL possible text content from the tweet
+        all_text = get_full_tweet_text(tweet)
+        text_lower = all_text.lower()
         is_bulk_related = False
         
         # Rule 1: Direct @bulktrade mention
@@ -326,11 +328,133 @@ def filter_bulk_tweets(tweets):
                     is_bulk_related = True
                     break
         
+        # Rule 5: Check quoted tweet's user_mentions
+        if not is_bulk_related:
+            quoted_tweet = tweet.get("quoted_tweet") or tweet.get("quoted_status") or {}
+            quoted_mentions = quoted_tweet.get("entities", {}).get("user_mentions", [])
+            for mention in quoted_mentions:
+                if mention.get("screen_name", "").lower() == "bulktrade":
+                    is_bulk_related = True
+                    break
+        
         if is_bulk_related:
             tweet["extracted_media"] = extract_media_url(tweet)
             bulk_tweets.append(tweet)
     
     return bulk_tweets
+
+
+def get_full_tweet_text(tweet):
+    """
+    Extract ALL text content from a tweet, including:
+    - Regular text
+    - Full text (for truncated tweets)
+    - Note/Article content (Twitter long-form posts)
+    - Quoted tweet text
+    - Card/URL preview text
+    """
+    text_parts = []
+    
+    # Main tweet text (multiple possible field names)
+    text_parts.append(tweet.get("text", ""))
+    text_parts.append(tweet.get("full_text", ""))
+    text_parts.append(tweet.get("tweet_text", ""))
+    
+    # Extended tweet (for tweets > 280 chars before note_tweet)
+    extended = tweet.get("extended_tweet", {})
+    if isinstance(extended, dict):
+        text_parts.append(extended.get("full_text", ""))
+    
+    # Note tweet / Twitter article content - check ALL possible paths
+    note_tweet = tweet.get("note_tweet") or {}
+    if isinstance(note_tweet, dict):
+        text_parts.append(note_tweet.get("text", ""))
+        text_parts.append(note_tweet.get("content", ""))
+        
+        # Path: note_tweet.note_tweet_results.result.text (GraphQL API structure)
+        note_results = note_tweet.get("note_tweet_results", {})
+        if isinstance(note_results, dict):
+            result = note_results.get("result", {})
+            if isinstance(result, dict):
+                text_parts.append(result.get("text", ""))
+                # Rich text blocks
+                entity_set = result.get("entity_set", {})
+                if isinstance(entity_set, dict):
+                    text_parts.append(entity_set.get("text", ""))
+        
+        # Notes can have rich text with multiple blocks
+        rich_text = note_tweet.get("rich_text") or {}
+        if isinstance(rich_text, dict):
+            text_parts.append(rich_text.get("plain_text", ""))
+            text_parts.append(rich_text.get("text", ""))
+    
+    # Article content (multiple possible structures)
+    article = tweet.get("article") or tweet.get("twitter_article") or {}
+    if isinstance(article, dict):
+        text_parts.append(article.get("title", ""))
+        text_parts.append(article.get("text", ""))
+        text_parts.append(article.get("content", ""))
+        text_parts.append(article.get("body", ""))
+        text_parts.append(article.get("subtitle", ""))
+        # Article results structure
+        results = article.get("article_results", {}).get("result", {})
+        if isinstance(results, dict):
+            text_parts.append(results.get("title", ""))
+            text_parts.append(results.get("text", ""))
+    
+    # Tweet legacy field (some APIs use this)
+    legacy = tweet.get("legacy", {})
+    if isinstance(legacy, dict):
+        text_parts.append(legacy.get("full_text", ""))
+        text_parts.append(legacy.get("text", ""))
+    
+    # Quoted tweet text - check recursively
+    quoted_tweet = tweet.get("quoted_tweet") or tweet.get("quoted_status") or {}
+    if isinstance(quoted_tweet, dict):
+        text_parts.append(quoted_tweet.get("text", ""))
+        text_parts.append(quoted_tweet.get("full_text", ""))
+        # Check quoted tweet's note/article too
+        quoted_note = quoted_tweet.get("note_tweet") or {}
+        if isinstance(quoted_note, dict):
+            text_parts.append(quoted_note.get("text", ""))
+            qn_results = quoted_note.get("note_tweet_results", {}).get("result", {})
+            if isinstance(qn_results, dict):
+                text_parts.append(qn_results.get("text", ""))
+        # Quoted legacy
+        quoted_legacy = quoted_tweet.get("legacy", {})
+        if isinstance(quoted_legacy, dict):
+            text_parts.append(quoted_legacy.get("full_text", ""))
+    
+    # Retweeted status
+    retweeted = tweet.get("retweeted_status") or tweet.get("retweeted_tweet") or {}
+    if isinstance(retweeted, dict):
+        text_parts.append(retweeted.get("text", ""))
+        text_parts.append(retweeted.get("full_text", ""))
+    
+    # Card/URL preview (sometimes has title/description)
+    card = tweet.get("card") or tweet.get("url_card") or {}
+    if isinstance(card, dict):
+        text_parts.append(card.get("title", ""))
+        text_parts.append(card.get("description", ""))
+        # Card binding values
+        binding = card.get("binding_values", {})
+        if isinstance(binding, dict):
+            for key in ["title", "description", "vanity_url"]:
+                val = binding.get(key, {})
+                if isinstance(val, dict):
+                    text_parts.append(val.get("string_value", ""))
+    
+    # URL entities might have expanded URLs with text
+    urls = tweet.get("entities", {}).get("urls", [])
+    for url in urls:
+        if isinstance(url, dict):
+            text_parts.append(url.get("title", ""))
+            text_parts.append(url.get("description", ""))
+            text_parts.append(url.get("expanded_url", ""))
+    
+    # Combine all text parts, remove empty strings and duplicates
+    full_text = " ".join(filter(None, text_parts))
+    return full_text
 
 
 def extract_media_url(tweet):
@@ -661,6 +785,70 @@ def test_user():
     if user_info:
         return jsonify({"success": True, "user": user_info})
     return jsonify({"error": "Failed to fetch user"}), 500
+
+
+@app.route('/api/debug-tweets', methods=['GET'])
+def debug_tweets():
+    """
+    Debug endpoint to see raw tweet structure - helps identify article fields
+    """
+    handle = request.args.get('handle', 'bulktrade')
+    limit = int(request.args.get('limit', 5))
+    
+    headers = {
+        "x-rapidapi-key": RAPIDAPI_KEY,
+        "x-rapidapi-host": RAPIDAPI_HOST
+    }
+    
+    try:
+        url = f"https://{RAPIDAPI_HOST}/timeline.php"
+        response = requests.get(url, headers=headers, params={"screenname": handle}, timeout=15)
+        
+        if response.status_code != 200:
+            return jsonify({"error": f"Failed to fetch @{handle}"}), 400
+        
+        data = response.json()
+        tweets = data.get("timeline", [])[:limit]
+        
+        # Show full structure of each tweet
+        debug_info = []
+        for i, tweet in enumerate(tweets):
+            # Get all keys in the tweet
+            all_keys = list(tweet.keys())
+            
+            # Extract text from various possible fields
+            extracted = {
+                "text": tweet.get("text", "")[:200],
+                "full_text": tweet.get("full_text", "")[:200] if tweet.get("full_text") else None,
+                "note_tweet": tweet.get("note_tweet"),
+                "article": tweet.get("article"),
+                "twitter_article": tweet.get("twitter_article"),
+                "quoted_tweet_text": (tweet.get("quoted_tweet") or {}).get("text", "")[:100] if tweet.get("quoted_tweet") else None,
+                "card": tweet.get("card"),
+                "url_card": tweet.get("url_card"),
+                "entities_urls": tweet.get("entities", {}).get("urls", []),
+            }
+            
+            # Check what we extract with our function
+            full_text_extracted = get_full_tweet_text(tweet)
+            
+            debug_info.append({
+                "index": i,
+                "all_keys": all_keys,
+                "extracted_fields": extracted,
+                "full_text_combined": full_text_extracted[:500],
+                "is_bulk_related": "@bulktrade" in full_text_extracted.lower() or "bulk" in full_text_extracted.lower()
+            })
+        
+        return jsonify({
+            "handle": handle,
+            "total_in_page": len(data.get("timeline", [])),
+            "showing": len(debug_info),
+            "tweets": debug_info
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == '__main__':
