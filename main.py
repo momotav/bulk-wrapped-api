@@ -439,7 +439,8 @@ def calculate_wrapped_stats(tweets, handle):
                 first_post = {
                     "text": tweet.get('text', '')[:280],
                     "date": created_at,
-                    "url": tweet_url
+                    "url": tweet_url,
+                    "media": tweet.get("extracted_media")
                 }
             
             month_key = post_date.strftime('%Y-%m')
