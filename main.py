@@ -20,649 +20,650 @@ RAPIDAPI_HOST = "twitter-api45.p.rapidapi.com"
 
 @app.route('/')
 def home():
-    return jsonify({"status": "BULK Wrapped API is running", "version": "2.0"})
+return jsonify({"status": "BULK Wrapped API is running", "version": "2.0"})
 
 
 @app.route('/api/ping', methods=['GET'])
 def ping():
-    return jsonify({"status": "ok"})
+return jsonify({"status": "ok"})
 
 
 @app.route('/api/wrapped', methods=['POST', 'OPTIONS'])
 def get_wrapped():
-    """Standard wrapped endpoint (no streaming)"""
-    if request.method == 'OPTIONS':
-        return '', 204
-    
-    data = request.json or {}
-    handle = data.get('handle', '').strip().replace('@', '')
-    
-    if not handle:
-        return jsonify({"error": "Handle is required"}), 400
-    
-    if not RAPIDAPI_KEY:
-        return jsonify({"error": "API not configured"}), 500
-    
-    try:
-        user_info = fetch_user_profile(handle)
-        tweets = fetch_user_tweets(handle)
-        bulk_tweets = filter_bulk_tweets(tweets)
-        
-        if not bulk_tweets:
-            return jsonify({
-                "error": "No BULK-related posts found for @" + handle,
-                "handle": handle,
-                "total_tweets_scanned": len(tweets),
-                "found": False
-            }), 404
-        
-        stats = calculate_wrapped_stats(bulk_tweets, handle)
-        stats["profile_image"] = user_info.get("profile_image") if user_info else None
-        stats["display_name"] = user_info.get("name") if user_info else handle
-        
-        # Add timeline data
-        timeline = build_timeline(bulk_tweets, handle)
-        
-        return jsonify({
-            "success": True,
-            "handle": handle,
-            "total_tweets_scanned": len(tweets),
-            "bulk_tweets_found": len(bulk_tweets),
-            "stats": stats,
-            "timeline": timeline,
-            "user": user_info
-        })
-        
-    except Exception as e:
-        print(f"Error: {e}")
-        return jsonify({"error": str(e)}), 500
+"""Standard wrapped endpoint (no streaming)"""
+if request.method == 'OPTIONS':
+return '', 204
+
+data = request.json or {}
+handle = data.get('handle', '').strip().replace('@', '')
+
+if not handle:
+return jsonify({"error": "Handle is required"}), 400
+
+if not RAPIDAPI_KEY:
+return jsonify({"error": "API not configured"}), 500
+
+try:
+user_info = fetch_user_profile(handle)
+tweets = fetch_user_tweets(handle)
+bulk_tweets = filter_bulk_tweets(tweets)
+
+if not bulk_tweets:
+return jsonify({
+"error": "No BULK-related posts found for @" + handle,
+"handle": handle,
+"total_tweets_scanned": len(tweets),
+"found": False
+}), 404
+
+stats = calculate_wrapped_stats(bulk_tweets, handle)
+stats["profile_image"] = user_info.get("profile_image") if user_info else None
+stats["display_name"] = user_info.get("name") if user_info else handle
+
+# Add timeline data
+timeline = build_timeline(bulk_tweets, handle)
+
+return jsonify({
+"success": True,
+"handle": handle,
+"total_tweets_scanned": len(tweets),
+"bulk_tweets_found": len(bulk_tweets),
+"stats": stats,
+"timeline": timeline,
+"user": user_info
+})
+
+except Exception as e:
+print(f"Error: {e}")
+return jsonify({"error": str(e)}), 500
 
 
 @app.route('/api/wrapped/stream', methods=['GET'])
 def get_wrapped_stream():
-    """
-    Streaming endpoint with Server-Sent Events for progress updates
-    """
-    handle = request.args.get('handle', '').strip().replace('@', '')
-    
-    if not handle:
-        return jsonify({"error": "Handle is required"}), 400
-    
-    if not RAPIDAPI_KEY:
-        return jsonify({"error": "API not configured"}), 500
-    
-    def generate():
-        try:
-            # Step 1: Fetch profile
-            yield f"data: {json.dumps({'step': 'profile', 'message': 'Fetching profile...', 'progress': 5})}\n\n"
-            user_info = fetch_user_profile(handle)
-            
-            # Step 2: Fetch tweets with progress
-            all_tweets = []
-            cursor = None
-            max_pages = 50
-            
-            headers = {
-                "x-rapidapi-key": RAPIDAPI_KEY,
-                "x-rapidapi-host": RAPIDAPI_HOST
-            }
-            
-            for page in range(max_pages):
-                progress = 5 + int((page / max_pages) * 75)  # 5-80%
-                yield f"data: {json.dumps({'step': 'scanning', 'message': f'Scanning page {page + 1}...', 'progress': progress, 'tweets_found': len(all_tweets)})}\n\n"
-                
-                url = f"https://{RAPIDAPI_HOST}/timeline.php"
-                params = {"screenname": handle}
-                if cursor:
-                    params["cursor"] = cursor
-                
-                try:
-                    response = requests.get(url, headers=headers, params=params, timeout=15)
-                    
-                    if response.status_code == 429:
-                        yield f"data: {json.dumps({'step': 'scanning', 'message': 'Rate limited, processing what we have...', 'progress': 80})}\n\n"
-                        break
-                    
-                    if response.status_code != 200:
-                        if page == 0:
-                            yield f"data: {json.dumps({'step': 'error', 'error': f'User @{handle} not found or private'})}\n\n"
-                            return
-                        break
-                    
-                    data = response.json()
-                    timeline = data.get("timeline", [])
-                    
-                    if not timeline:
-                        break
-                    
-                    all_tweets.extend(timeline)
-                    cursor = data.get("next_cursor")
-                    
-                    if not cursor:
-                        break
-                        
-                except requests.exceptions.Timeout:
-                    break
-                except Exception as e:
-                    if page == 0:
-                        yield f"data: {json.dumps({'step': 'error', 'error': str(e)})}\n\n"
-                        return
-                    break
-            
-            # Step 3: Filter tweets
-            yield f"data: {json.dumps({'step': 'filtering', 'message': f'Found {len(all_tweets)} tweets, filtering for BULK...', 'progress': 85})}\n\n"
-            bulk_tweets = filter_bulk_tweets(all_tweets)
-            
-            if not bulk_tweets:
-                yield f"data: {json.dumps({'step': 'error', 'error': f'No BULK-related posts found for @{handle}', 'total_scanned': len(all_tweets)})}\n\n"
-                return
-            
-            # Step 4: Calculate stats
-            yield f"data: {json.dumps({'step': 'calculating', 'message': f'Found {len(bulk_tweets)} BULK posts! Calculating stats...', 'progress': 90})}\n\n"
-            stats = calculate_wrapped_stats(bulk_tweets, handle)
-            stats["profile_image"] = user_info.get("profile_image") if user_info else None
-            stats["display_name"] = user_info.get("name") if user_info else handle
-            
-            # Step 5: Build timeline
-            yield f"data: {json.dumps({'step': 'timeline', 'message': 'Building your journey timeline...', 'progress': 95})}\n\n"
-            timeline = build_timeline(bulk_tweets, handle)
-            
-            # Step 6: Complete
-            result = {
-                "step": "complete",
-                "progress": 100,
-                "success": True,
-                "handle": handle,
-                "total_tweets_scanned": len(all_tweets),
-                "bulk_tweets_found": len(bulk_tweets),
-                "stats": stats,
-                "timeline": timeline,
-                "user": user_info
-            }
-            yield f"data: {json.dumps(result)}\n\n"
-            
-        except Exception as e:
-            yield f"data: {json.dumps({'step': 'error', 'error': str(e)})}\n\n"
-    
-    return Response(generate(), mimetype='text/event-stream', headers={
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-        'Access-Control-Allow-Origin': '*'
-    })
+"""
+   Streaming endpoint with Server-Sent Events for progress updates
+   """
+handle = request.args.get('handle', '').strip().replace('@', '')
+
+if not handle:
+return jsonify({"error": "Handle is required"}), 400
+
+if not RAPIDAPI_KEY:
+return jsonify({"error": "API not configured"}), 500
+
+def generate():
+try:
+# Step 1: Fetch profile
+yield f"data: {json.dumps({'step': 'profile', 'message': 'Fetching profile...', 'progress': 5})}\n\n"
+user_info = fetch_user_profile(handle)
+
+# Step 2: Fetch tweets with progress
+all_tweets = []
+cursor = None
+max_pages = 50
+
+headers = {
+"x-rapidapi-key": RAPIDAPI_KEY,
+"x-rapidapi-host": RAPIDAPI_HOST
+}
+
+for page in range(max_pages):
+progress = 5 + int((page / max_pages) * 75)  # 5-80%
+yield f"data: {json.dumps({'step': 'scanning', 'message': f'Scanning page {page + 1}...', 'progress': progress, 'tweets_found': len(all_tweets)})}\n\n"
+
+url = f"https://{RAPIDAPI_HOST}/timeline.php"
+params = {"screenname": handle}
+if cursor:
+params["cursor"] = cursor
+
+try:
+response = requests.get(url, headers=headers, params=params, timeout=15)
+
+if response.status_code == 429:
+yield f"data: {json.dumps({'step': 'scanning', 'message': 'Rate limited, processing what we have...', 'progress': 80})}\n\n"
+break
+
+if response.status_code != 200:
+if page == 0:
+yield f"data: {json.dumps({'step': 'error', 'error': f'User @{handle} not found or private'})}\n\n"
+return
+break
+
+data = response.json()
+timeline = data.get("timeline", [])
+
+if not timeline:
+break
+
+all_tweets.extend(timeline)
+cursor = data.get("next_cursor")
+
+if not cursor:
+break
+
+except requests.exceptions.Timeout:
+break
+except Exception as e:
+if page == 0:
+yield f"data: {json.dumps({'step': 'error', 'error': str(e)})}\n\n"
+return
+break
+
+# Step 3: Filter tweets
+yield f"data: {json.dumps({'step': 'filtering', 'message': f'Found {len(all_tweets)} tweets, filtering for BULK...', 'progress': 85})}\n\n"
+bulk_tweets = filter_bulk_tweets(all_tweets)
+
+if not bulk_tweets:
+yield f"data: {json.dumps({'step': 'error', 'error': f'No BULK-related posts found for @{handle}', 'total_scanned': len(all_tweets)})}\n\n"
+return
+
+# Step 4: Calculate stats
+yield f"data: {json.dumps({'step': 'calculating', 'message': f'Found {len(bulk_tweets)} BULK posts! Calculating stats...', 'progress': 90})}\n\n"
+stats = calculate_wrapped_stats(bulk_tweets, handle)
+stats["profile_image"] = user_info.get("profile_image") if user_info else None
+stats["display_name"] = user_info.get("name") if user_info else handle
+
+# Step 5: Build timeline
+yield f"data: {json.dumps({'step': 'timeline', 'message': 'Building your journey timeline...', 'progress': 95})}\n\n"
+timeline = build_timeline(bulk_tweets, handle)
+
+# Step 6: Complete
+result = {
+"step": "complete",
+"progress": 100,
+"success": True,
+"handle": handle,
+"total_tweets_scanned": len(all_tweets),
+"bulk_tweets_found": len(bulk_tweets),
+"stats": stats,
+"timeline": timeline,
+"user": user_info
+}
+yield f"data: {json.dumps(result)}\n\n"
+
+except Exception as e:
+yield f"data: {json.dumps({'step': 'error', 'error': str(e)})}\n\n"
+
+return Response(generate(), mimetype='text/event-stream', headers={
+'Cache-Control': 'no-cache',
+'Connection': 'keep-alive',
+'Access-Control-Allow-Origin': '*'
+})
 
 
 def fetch_user_profile(handle):
-    """Fetch user's profile info including PFP"""
-    headers = {
-        "x-rapidapi-key": RAPIDAPI_KEY,
-        "x-rapidapi-host": RAPIDAPI_HOST
-    }
-    
-    try:
-        url = f"https://{RAPIDAPI_HOST}/screenname.php"
-        response = requests.get(url, headers=headers, params={"screenname": handle}, timeout=10)
-        
-        if response.status_code != 200:
-            return None
-        
-        data = response.json()
-        
-        profile_image = (
-            data.get("profile_image_url_https") or
-            data.get("profile_image_url") or
-            data.get("avatar") or
-            data.get("profile_pic_url") or
-            data.get("profile_image")
-        )
-        
-        if profile_image and "_normal" in profile_image:
-            profile_image = profile_image.replace("_normal", "_400x400")
-        
-        return {
-            "name": data.get("name") or handle,
-            "screen_name": data.get("screen_name") or handle,
-            "profile_image": profile_image,
-            "followers": data.get("followers_count") or data.get("followers") or 0,
-            "following": data.get("friends_count") or data.get("following") or 0,
-            "bio": data.get("description") or data.get("bio") or ""
-        }
-        
-    except Exception as e:
-        print(f"Profile error: {e}")
-        return None
+"""Fetch user's profile info including PFP"""
+headers = {
+"x-rapidapi-key": RAPIDAPI_KEY,
+"x-rapidapi-host": RAPIDAPI_HOST
+}
+
+try:
+url = f"https://{RAPIDAPI_HOST}/screenname.php"
+response = requests.get(url, headers=headers, params={"screenname": handle}, timeout=10)
+
+if response.status_code != 200:
+return None
+
+data = response.json()
+
+profile_image = (
+data.get("profile_image_url_https") or
+data.get("profile_image_url") or
+data.get("avatar") or
+data.get("profile_pic_url") or
+data.get("profile_image")
+)
+
+if profile_image and "_normal" in profile_image:
+profile_image = profile_image.replace("_normal", "_400x400")
+
+return {
+"name": data.get("name") or handle,
+"screen_name": data.get("screen_name") or handle,
+"profile_image": profile_image,
+"followers": data.get("followers_count") or data.get("followers") or 0,
+"following": data.get("friends_count") or data.get("following") or 0,
+"bio": data.get("description") or data.get("bio") or ""
+}
+
+except Exception as e:
+print(f"Profile error: {e}")
+return None
 
 
 def fetch_user_tweets(handle):
-    """Fetch user tweets (non-streaming version)"""
-    all_tweets = []
-    cursor = None
-    max_pages = 50
-    
-    headers = {
-        "x-rapidapi-key": RAPIDAPI_KEY,
-        "x-rapidapi-host": RAPIDAPI_HOST
-    }
-    
-    for page in range(max_pages):
-        url = f"https://{RAPIDAPI_HOST}/timeline.php"
-        params = {"screenname": handle}
-        
-        if cursor:
-            params["cursor"] = cursor
-        
-        try:
-            response = requests.get(url, headers=headers, params=params, timeout=15)
-            
-            if response.status_code != 200:
-                if page == 0:
-                    raise Exception(f"Failed to fetch user @{handle}")
-                break
-            
-            data = response.json()
-            timeline = data.get("timeline", [])
-            
-            if not timeline:
-                break
-            
-            all_tweets.extend(timeline)
-            cursor = data.get("next_cursor")
-            
-            if not cursor:
-                break
-                
-        except requests.exceptions.Timeout:
-            break
-        except Exception as e:
-            if page == 0:
-                raise
-            break
-    
-    return all_tweets
+"""Fetch user tweets (non-streaming version)"""
+all_tweets = []
+cursor = None
+max_pages = 50
+
+headers = {
+"x-rapidapi-key": RAPIDAPI_KEY,
+"x-rapidapi-host": RAPIDAPI_HOST
+}
+
+for page in range(max_pages):
+url = f"https://{RAPIDAPI_HOST}/timeline.php"
+params = {"screenname": handle}
+
+if cursor:
+params["cursor"] = cursor
+
+try:
+response = requests.get(url, headers=headers, params=params, timeout=15)
+
+if response.status_code != 200:
+if page == 0:
+raise Exception(f"Failed to fetch user @{handle}")
+break
+
+data = response.json()
+timeline = data.get("timeline", [])
+
+if not timeline:
+break
+
+all_tweets.extend(timeline)
+cursor = data.get("next_cursor")
+
+if not cursor:
+break
+
+except requests.exceptions.Timeout:
+break
+except Exception as e:
+if page == 0:
+raise
+break
+
+return all_tweets
 
 
 def filter_bulk_tweets(tweets):
-    """
-    Filter tweets related to BULK project.
-    Rules:
-    1. @bulktrade in text → count it
-    2. "bulk" or "gbulk" + context keyword → count it
-    3. "gbulk" alone → count it (gBULK token)
-    """
-    bulk_tweets = []
-    
-    context_keywords = [
-        "perp", "dex", "exchange", "trade", "long", "short",
-        "liquidation", "decentralized", "trading", "community",
-        "role", "og", "contributor", "@kdotcrypto", "@rizzy_sol",
-        "@glowburger", "@junbug_sol", "bulkgram", "testnet",
-        "airdrop", "token", "sol", "solana", "wrapped", "claim"
-    ]
-    
-    for tweet in tweets:
-        text = tweet.get("text", "")
-        text_lower = text.lower()
-        is_bulk_related = False
-        
-        # Rule 1: Direct @bulktrade mention
-        if "@bulktrade" in text_lower:
-            is_bulk_related = True
-        
-        # Rule 2: "bulk" + context keyword
-        if not is_bulk_related and "bulk" in text_lower:
-            for keyword in context_keywords:
-                if keyword in text_lower:
-                    is_bulk_related = True
-                    break
-        
-        # Rule 3: "gbulk" (gBULK token) - always count
-        if not is_bulk_related and "gbulk" in text_lower:
-            is_bulk_related = True
-        
-        # Rule 4: Check user_mentions for @bulktrade
-        if not is_bulk_related:
-            user_mentions = tweet.get("entities", {}).get("user_mentions", [])
-            for mention in user_mentions:
-                if mention.get("screen_name", "").lower() == "bulktrade":
-                    is_bulk_related = True
-                    break
-        
-        if is_bulk_related:
-            tweet["extracted_media"] = extract_media_url(tweet)
-            bulk_tweets.append(tweet)
-    
-    return bulk_tweets
+"""
+   Filter tweets related to BULK project.
+   Rules:
+   1. @bulktrade in text → count it
+   2. "bulk" or "gbulk" + context keyword → count it
+   3. "gbulk" alone → count it (gBULK token)
+   """
+bulk_tweets = []
+
+context_keywords = [
+"perp", "dex", "exchange", "trade", "long", "short",
+"liquidation", "decentralized", "trading", "community",
+"role", "og", "contributor", "@kdotcrypto", "@rizzy_sol",
+"@glowburger", "@junbug_sol", "bulkgram", "testnet",
+"airdrop", "token", "sol", "solana", "wrapped", "claim"
+]
+
+for tweet in tweets:
+text = tweet.get("text", "")
+text_lower = text.lower()
+is_bulk_related = False
+
+# Rule 1: Direct @bulktrade mention
+if "@bulktrade" in text_lower:
+is_bulk_related = True
+
+# Rule 2: "bulk" + context keyword
+if not is_bulk_related and "bulk" in text_lower:
+for keyword in context_keywords:
+if keyword in text_lower:
+is_bulk_related = True
+break
+
+# Rule 3: "gbulk" (gBULK token) - always count
+if not is_bulk_related and "gbulk" in text_lower:
+is_bulk_related = True
+
+# Rule 4: Check user_mentions for @bulktrade
+if not is_bulk_related:
+user_mentions = tweet.get("entities", {}).get("user_mentions", [])
+for mention in user_mentions:
+if mention.get("screen_name", "").lower() == "bulktrade":
+is_bulk_related = True
+break
+
+if is_bulk_related:
+tweet["extracted_media"] = extract_media_url(tweet)
+bulk_tweets.append(tweet)
+
+return bulk_tweets
 
 
 def extract_media_url(tweet):
-    """Extract media URL from tweet"""
-    media = tweet.get("media")
-    
-    if isinstance(media, dict):
-        photos = media.get("photo", [])
-        if photos and len(photos) > 0:
-            return photos[0].get("media_url_https") or photos[0].get("media_url")
-        
-        videos = media.get("video", [])
-        if videos and len(videos) > 0:
-            return videos[0].get("media_url_https") or videos[0].get("thumbnail_url")
-    
-    elif isinstance(media, list) and len(media) > 0:
-        return media[0].get("media_url_https") or media[0].get("media_url")
-    
-    ext_media = tweet.get("extended_entities", {}).get("media", [])
-    if ext_media and len(ext_media) > 0:
-        return ext_media[0].get("media_url_https")
-    
-    ent_media = tweet.get("entities", {}).get("media", [])
-    if ent_media and len(ent_media) > 0:
-        return ent_media[0].get("media_url_https")
-    
-    return None
+"""Extract media URL from tweet"""
+media = tweet.get("media")
+
+if isinstance(media, dict):
+photos = media.get("photo", [])
+if photos and len(photos) > 0:
+return photos[0].get("media_url_https") or photos[0].get("media_url")
+
+videos = media.get("video", [])
+if videos and len(videos) > 0:
+return videos[0].get("media_url_https") or videos[0].get("thumbnail_url")
+
+elif isinstance(media, list) and len(media) > 0:
+return media[0].get("media_url_https") or media[0].get("media_url")
+
+ext_media = tweet.get("extended_entities", {}).get("media", [])
+if ext_media and len(ext_media) > 0:
+return ext_media[0].get("media_url_https")
+
+ent_media = tweet.get("entities", {}).get("media", [])
+if ent_media and len(ent_media) > 0:
+return ent_media[0].get("media_url_https")
+
+return None
 
 
 def parse_tweet_date(created_at):
-    """Parse tweet date from various formats"""
-    if not created_at:
-        return None
-    
-    try:
-        if 'T' in str(created_at):
-            return datetime.fromisoformat(created_at.replace('Z', '+00:00'))
-        else:
-            return datetime.strptime(created_at, '%a %b %d %H:%M:%S %z %Y')
-    except:
-        return None
+"""Parse tweet date from various formats"""
+if not created_at:
+return None
+
+try:
+if 'T' in str(created_at):
+return datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+else:
+return datetime.strptime(created_at, '%a %b %d %H:%M:%S %z %Y')
+except:
+return None
 
 
 def calculate_wrapped_stats(tweets, handle):
-    """Calculate wrapped statistics from tweets"""
-    
-    total_posts = len(tweets)
-    total_views = 0
-    total_likes = 0
-    total_retweets = 0
-    total_replies = 0
-    
-    most_viral_post = None
-    most_liked_post = None
-    max_views = 0
-    max_likes = 0
-    
-    first_post_date = None
-    first_post = None
-    
-    posts_by_month = defaultdict(int)
-    
-    for tweet in tweets:
-        views = int(tweet.get('views', 0) or 0)
-        likes = int(tweet.get('favorites', 0) or tweet.get('favorite_count', 0) or 0)
-        retweets = int(tweet.get('retweets', 0) or tweet.get('retweet_count', 0) or 0)
-        replies = int(tweet.get('replies', 0) or tweet.get('reply_count', 0) or 0)
-        
-        total_views += views
-        total_likes += likes
-        total_retweets += retweets
-        total_replies += replies
-        
-        tweet_id = tweet.get('tweet_id') or tweet.get('id_str') or tweet.get('id', '')
-        tweet_url = f"https://twitter.com/{handle}/status/{tweet_id}"
-        media_url = tweet.get("extracted_media")
-        
-        if views > max_views:
-            max_views = views
-            most_viral_post = {
-                "text": tweet.get('text', '')[:280],
-                "views": views,
-                "likes": likes,
-                "url": tweet_url,
-                "date": tweet.get('created_at', ''),
-                "media": media_url
-            }
-        
-        if likes > max_likes:
-            max_likes = likes
-            most_liked_post = {
-                "text": tweet.get('text', '')[:280],
-                "views": views,
-                "likes": likes,
-                "url": tweet_url,
-                "date": tweet.get('created_at', ''),
-                "media": media_url
-            }
-        
-        created_at = tweet.get('created_at', '')
-        post_date = parse_tweet_date(created_at)
-        
-        if post_date:
-            if first_post_date is None or post_date < first_post_date:
-                first_post_date = post_date
-                first_post = {
-                    "text": tweet.get('text', '')[:280],
-                    "date": created_at,
+"""Calculate wrapped statistics from tweets"""
+
+total_posts = len(tweets)
+total_views = 0
+total_likes = 0
+total_retweets = 0
+total_replies = 0
+
+most_viral_post = None
+most_liked_post = None
+max_views = 0
+max_likes = 0
+
+first_post_date = None
+first_post = None
+
+posts_by_month = defaultdict(int)
+
+for tweet in tweets:
+views = int(tweet.get('views', 0) or 0)
+likes = int(tweet.get('favorites', 0) or tweet.get('favorite_count', 0) or 0)
+retweets = int(tweet.get('retweets', 0) or tweet.get('retweet_count', 0) or 0)
+replies = int(tweet.get('replies', 0) or tweet.get('reply_count', 0) or 0)
+
+total_views += views
+total_likes += likes
+total_retweets += retweets
+total_replies += replies
+
+tweet_id = tweet.get('tweet_id') or tweet.get('id_str') or tweet.get('id', '')
+tweet_url = f"https://twitter.com/{handle}/status/{tweet_id}"
+media_url = tweet.get("extracted_media")
+
+if views > max_views:
+max_views = views
+most_viral_post = {
+"text": tweet.get('text', '')[:280],
+"views": views,
+"likes": likes,
+"url": tweet_url,
+"date": tweet.get('created_at', ''),
+"media": media_url
+}
+
+if likes > max_likes:
+max_likes = likes
+most_liked_post = {
+"text": tweet.get('text', '')[:280],
+"views": views,
+"likes": likes,
+"url": tweet_url,
+"date": tweet.get('created_at', ''),
+"media": media_url
+}
+
+created_at = tweet.get('created_at', '')
+post_date = parse_tweet_date(created_at)
+
+if post_date:
+if first_post_date is None or post_date < first_post_date:
+first_post_date = post_date
+first_post = {
+"text": tweet.get('text', '')[:280],
+"date": created_at,
+                    "url": tweet_url
                     "url": tweet_url,
                     "media": tweet.get("extracted_media")
-                }
-            
-            month_key = post_date.strftime('%Y-%m')
-            posts_by_month[month_key] += 1
-    
-    streak = calculate_streak(posts_by_month)
-    
-    first_post_formatted = None
-    if first_post_date:
-        first_post_formatted = first_post_date.strftime('%B %d, %Y')
-    
-    return {
-        "total_posts": total_posts,
-        "total_views": total_views,
-        "total_likes": total_likes,
-        "total_retweets": total_retweets,
-        "total_replies": total_replies,
-        "total_engagement": total_likes + total_retweets + total_replies,
-        "most_viral_post": most_viral_post,
-        "most_liked_post": most_liked_post,
-        "first_post": first_post,
-        "first_post_date": first_post_formatted,
-        "posting_streak": streak,
-        "posts_by_month": dict(posts_by_month)
-    }
+}
+
+month_key = post_date.strftime('%Y-%m')
+posts_by_month[month_key] += 1
+
+streak = calculate_streak(posts_by_month)
+
+first_post_formatted = None
+if first_post_date:
+first_post_formatted = first_post_date.strftime('%B %d, %Y')
+
+return {
+"total_posts": total_posts,
+"total_views": total_views,
+"total_likes": total_likes,
+"total_retweets": total_retweets,
+"total_replies": total_replies,
+"total_engagement": total_likes + total_retweets + total_replies,
+"most_viral_post": most_viral_post,
+"most_liked_post": most_liked_post,
+"first_post": first_post,
+"first_post_date": first_post_formatted,
+"posting_streak": streak,
+"posts_by_month": dict(posts_by_month)
+}
 
 
 def calculate_streak(posts_by_month):
-    """Calculate longest consecutive month posting streak"""
-    if not posts_by_month:
-        return 0
-    
-    sorted_months = sorted(posts_by_month.keys())
-    
-    if len(sorted_months) <= 1:
-        return len(sorted_months)
-    
-    max_streak = 1
-    current_streak = 1
-    
-    for i in range(1, len(sorted_months)):
-        prev_year, prev_month = map(int, sorted_months[i-1].split('-'))
-        curr_year, curr_month = map(int, sorted_months[i].split('-'))
-        
-        expected_year = prev_year + (prev_month // 12)
-        expected_month = (prev_month % 12) + 1
-        
-        if curr_year == expected_year and curr_month == expected_month:
-            current_streak += 1
-            max_streak = max(max_streak, current_streak)
-        else:
-            current_streak = 1
-    
-    return max_streak
+"""Calculate longest consecutive month posting streak"""
+if not posts_by_month:
+return 0
+
+sorted_months = sorted(posts_by_month.keys())
+
+if len(sorted_months) <= 1:
+return len(sorted_months)
+
+max_streak = 1
+current_streak = 1
+
+for i in range(1, len(sorted_months)):
+prev_year, prev_month = map(int, sorted_months[i-1].split('-'))
+curr_year, curr_month = map(int, sorted_months[i].split('-'))
+
+expected_year = prev_year + (prev_month // 12)
+expected_month = (prev_month % 12) + 1
+
+if curr_year == expected_year and curr_month == expected_month:
+current_streak += 1
+max_streak = max(max_streak, current_streak)
+else:
+current_streak = 1
+
+return max_streak
 
 
 def build_timeline(tweets, handle):
-    """
-    Build chronological timeline with bi-weekly view milestones
-    """
-    if not tweets:
-        return []
-    
-    # Parse all tweets with dates
-    dated_tweets = []
-    for tweet in tweets:
-        post_date = parse_tweet_date(tweet.get('created_at'))
-        if post_date:
-            views = int(tweet.get('views', 0) or 0)
-            likes = int(tweet.get('favorites', 0) or tweet.get('favorite_count', 0) or 0)
-            tweet_id = tweet.get('tweet_id') or tweet.get('id_str') or tweet.get('id', '')
-            
-            dated_tweets.append({
-                "date": post_date,
-                "views": views,
-                "likes": likes,
-                "text": tweet.get('text', '')[:100],
-                "url": f"https://twitter.com/{handle}/status/{tweet_id}",
-                "media": tweet.get("extracted_media")
-            })
-    
-    if not dated_tweets:
-        return []
-    
-    # Sort by date (oldest first)
-    dated_tweets.sort(key=lambda x: x["date"])
-    
-    timeline_events = []
-    
-    # First post event
-    first = dated_tweets[0]
-    timeline_events.append({
-        "type": "first_post",
-        "date": first["date"].strftime('%B %d, %Y'),
-        "timestamp": first["date"].isoformat(),
-        "title": "🚀 Journey Started",
-        "description": "Your first BULK post",
-        "text": first["text"],
-        "url": first["url"]
-    })
-    
-    # Calculate bi-weekly cumulative views
-    if len(dated_tweets) > 1:
-        start_date = dated_tweets[0]["date"]
-        end_date = dated_tweets[-1]["date"]
-        
-        # Group by 2-week periods
-        current_period_start = start_date
-        period_views = 0
-        period_posts = 0
-        
-        biweekly_data = []
-        
-        for tweet in dated_tweets:
-            # Check if we've moved to a new 2-week period
-            days_diff = (tweet["date"] - current_period_start).days
-            
-            if days_diff >= 14:
-                # Save current period
-                if period_posts > 0:
-                    biweekly_data.append({
-                        "period_start": current_period_start,
-                        "views": period_views,
-                        "posts": period_posts
-                    })
-                
-                # Start new period
-                current_period_start = tweet["date"]
-                period_views = tweet["views"]
-                period_posts = 1
-            else:
-                period_views += tweet["views"]
-                period_posts += 1
-        
-        # Don't forget last period
-        if period_posts > 0:
-            biweekly_data.append({
-                "period_start": current_period_start,
-                "views": period_views,
-                "posts": period_posts
-            })
-        
-        # Add significant milestones (view milestones)
-        cumulative_views = 0
-        view_milestones = [1000, 5000, 10000, 50000, 100000, 500000, 1000000]
-        reached_milestones = set()
-        
-        for i, period in enumerate(biweekly_data):
-            cumulative_views += period["views"]
-            
-            # Check for view milestones
-            for milestone in view_milestones:
-                if cumulative_views >= milestone and milestone not in reached_milestones:
-                    reached_milestones.add(milestone)
-                    timeline_events.append({
-                        "type": "milestone",
-                        "date": period["period_start"].strftime('%B %d, %Y'),
-                        "timestamp": period["period_start"].isoformat(),
-                        "title": f"🎯 {format_number(milestone)} Views!",
-                        "description": f"Reached {format_number(milestone)} cumulative views",
-                        "cumulative_views": cumulative_views
-                    })
-        
-        # Add bi-weekly summary data for chart
-        timeline_events.append({
-            "type": "biweekly_chart",
-            "data": [
-                {
-                    "period": p["period_start"].strftime('%b %d'),
-                    "views": p["views"],
-                    "posts": p["posts"]
-                }
-                for p in biweekly_data
-            ]
-        })
-    
-    # Find most viral post
-    most_viral = max(dated_tweets, key=lambda x: x["views"])
-    if most_viral["views"] > 0:
-        timeline_events.append({
-            "type": "viral",
-            "date": most_viral["date"].strftime('%B %d, %Y'),
-            "timestamp": most_viral["date"].isoformat(),
-            "title": f"🔥 Viral Hit: {format_number(most_viral['views'])} views",
-            "description": "Your most viewed BULK post",
-            "text": most_viral["text"],
-            "url": most_viral["url"],
-            "media": most_viral["media"]
-        })
-    
-    # Sort timeline by date
-    timeline_events.sort(key=lambda x: x.get("timestamp", "9999"))
-    
-    return timeline_events
+"""
+   Build chronological timeline with bi-weekly view milestones
+   """
+if not tweets:
+return []
+
+# Parse all tweets with dates
+dated_tweets = []
+for tweet in tweets:
+post_date = parse_tweet_date(tweet.get('created_at'))
+if post_date:
+views = int(tweet.get('views', 0) or 0)
+likes = int(tweet.get('favorites', 0) or tweet.get('favorite_count', 0) or 0)
+tweet_id = tweet.get('tweet_id') or tweet.get('id_str') or tweet.get('id', '')
+
+dated_tweets.append({
+"date": post_date,
+"views": views,
+"likes": likes,
+"text": tweet.get('text', '')[:100],
+"url": f"https://twitter.com/{handle}/status/{tweet_id}",
+"media": tweet.get("extracted_media")
+})
+
+if not dated_tweets:
+return []
+
+# Sort by date (oldest first)
+dated_tweets.sort(key=lambda x: x["date"])
+
+timeline_events = []
+
+# First post event
+first = dated_tweets[0]
+timeline_events.append({
+"type": "first_post",
+"date": first["date"].strftime('%B %d, %Y'),
+"timestamp": first["date"].isoformat(),
+"title": "🚀 Journey Started",
+"description": "Your first BULK post",
+"text": first["text"],
+"url": first["url"]
+})
+
+# Calculate bi-weekly cumulative views
+if len(dated_tweets) > 1:
+start_date = dated_tweets[0]["date"]
+end_date = dated_tweets[-1]["date"]
+
+# Group by 2-week periods
+current_period_start = start_date
+period_views = 0
+period_posts = 0
+
+biweekly_data = []
+
+for tweet in dated_tweets:
+# Check if we've moved to a new 2-week period
+days_diff = (tweet["date"] - current_period_start).days
+
+if days_diff >= 14:
+# Save current period
+if period_posts > 0:
+biweekly_data.append({
+"period_start": current_period_start,
+"views": period_views,
+"posts": period_posts
+})
+
+# Start new period
+current_period_start = tweet["date"]
+period_views = tweet["views"]
+period_posts = 1
+else:
+period_views += tweet["views"]
+period_posts += 1
+
+# Don't forget last period
+if period_posts > 0:
+biweekly_data.append({
+"period_start": current_period_start,
+"views": period_views,
+"posts": period_posts
+})
+
+# Add significant milestones (view milestones)
+cumulative_views = 0
+view_milestones = [1000, 5000, 10000, 50000, 100000, 500000, 1000000]
+reached_milestones = set()
+
+for i, period in enumerate(biweekly_data):
+cumulative_views += period["views"]
+
+# Check for view milestones
+for milestone in view_milestones:
+if cumulative_views >= milestone and milestone not in reached_milestones:
+reached_milestones.add(milestone)
+timeline_events.append({
+"type": "milestone",
+"date": period["period_start"].strftime('%B %d, %Y'),
+"timestamp": period["period_start"].isoformat(),
+"title": f"🎯 {format_number(milestone)} Views!",
+"description": f"Reached {format_number(milestone)} cumulative views",
+"cumulative_views": cumulative_views
+})
+
+# Add bi-weekly summary data for chart
+timeline_events.append({
+"type": "biweekly_chart",
+"data": [
+{
+"period": p["period_start"].strftime('%b %d'),
+"views": p["views"],
+"posts": p["posts"]
+}
+for p in biweekly_data
+]
+})
+
+# Find most viral post
+most_viral = max(dated_tweets, key=lambda x: x["views"])
+if most_viral["views"] > 0:
+timeline_events.append({
+"type": "viral",
+"date": most_viral["date"].strftime('%B %d, %Y'),
+"timestamp": most_viral["date"].isoformat(),
+"title": f"🔥 Viral Hit: {format_number(most_viral['views'])} views",
+"description": "Your most viewed BULK post",
+"text": most_viral["text"],
+"url": most_viral["url"],
+"media": most_viral["media"]
+})
+
+# Sort timeline by date
+timeline_events.sort(key=lambda x: x.get("timestamp", "9999"))
+
+return timeline_events
 
 
 def format_number(num):
-    """Format number with K/M suffix"""
-    if num >= 1000000:
-        return f"{num/1000000:.1f}M"
-    if num >= 1000:
-        return f"{num/1000:.1f}K"
-    return str(num)
+"""Format number with K/M suffix"""
+if num >= 1000000:
+return f"{num/1000000:.1f}M"
+if num >= 1000:
+return f"{num/1000:.1f}K"
+return str(num)
 
 
 # Debug endpoints
 @app.route('/api/test', methods=['GET'])
 def test_api():
-    if not RAPIDAPI_KEY:
-        return jsonify({"error": "RAPIDAPI_KEY not set"}), 500
-    return jsonify({"status": "API configured", "key_preview": RAPIDAPI_KEY[:10] + "..."})
+if not RAPIDAPI_KEY:
+return jsonify({"error": "RAPIDAPI_KEY not set"}), 500
+return jsonify({"status": "API configured", "key_preview": RAPIDAPI_KEY[:10] + "..."})
 
 
 @app.route('/api/test-user', methods=['GET'])
 def test_user():
-    handle = request.args.get('handle', 'bulktrade')
-    user_info = fetch_user_profile(handle)
-    if user_info:
-        return jsonify({"success": True, "user": user_info})
-    return jsonify({"error": "Failed to fetch user"}), 500
+handle = request.args.get('handle', 'bulktrade')
+user_info = fetch_user_profile(handle)
+if user_info:
+return jsonify({"success": True, "user": user_info})
+return jsonify({"error": "Failed to fetch user"}), 500
 
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=True, threaded=True)
+port = int(os.environ.get('PORT', 5000))
+app.run(host='0.0.0.0', port=port, debug=True, threaded=True)
