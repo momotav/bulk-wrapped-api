@@ -647,7 +647,15 @@ def get_full_tweet_text(tweet):
 
 
 def extract_media_url(tweet):
-    """Extract media URL from tweet"""
+    """Extract media URL from tweet, including article cover images"""
+    
+    # Check article cover image first (for Twitter articles)
+    article = tweet.get("article")
+    if isinstance(article, dict):
+        cover = article.get("cover_media")
+        if cover:
+            return cover
+    
     media = tweet.get("media")
     
     if isinstance(media, dict):
@@ -687,6 +695,28 @@ def parse_tweet_date(created_at):
         return None
 
 
+def safe_int(value):
+    """Safely convert a value to int, handling strings and None"""
+    if value is None:
+        return 0
+    try:
+        # Handle string numbers like "96" or "7.5K"
+        if isinstance(value, str):
+            value = value.strip().lower()
+            if not value:
+                return 0
+            # Handle K/M suffixes
+            if value.endswith('k'):
+                return int(float(value[:-1]) * 1000)
+            elif value.endswith('m'):
+                return int(float(value[:-1]) * 1000000)
+            else:
+                return int(float(value))
+        return int(value)
+    except (ValueError, TypeError):
+        return 0
+
+
 def calculate_wrapped_stats(tweets, handle):
     """Calculate wrapped statistics from tweets"""
     
@@ -707,10 +737,12 @@ def calculate_wrapped_stats(tweets, handle):
     posts_by_month = defaultdict(int)
     
     for tweet in tweets:
-        views = int(tweet.get('views', 0) or 0)
-        likes = int(tweet.get('favorites', 0) or tweet.get('favorite_count', 0) or 0)
-        retweets = int(tweet.get('retweets', 0) or tweet.get('retweet_count', 0) or 0)
-        replies = int(tweet.get('replies', 0) or tweet.get('reply_count', 0) or 0)
+        # Extract stats - check multiple possible field names
+        # API sometimes returns these as strings, so convert safely
+        views = safe_int(tweet.get('views') or tweet.get('view_count') or 0)
+        likes = safe_int(tweet.get('likes') or tweet.get('favorites') or tweet.get('favorite_count') or 0)
+        retweets = safe_int(tweet.get('retweets') or tweet.get('retweet_count') or 0)
+        replies = safe_int(tweet.get('replies') or tweet.get('reply_count') or 0)
         
         total_views += views
         total_likes += likes
@@ -719,12 +751,20 @@ def calculate_wrapped_stats(tweets, handle):
         
         tweet_id = tweet.get('tweet_id') or tweet.get('id_str') or tweet.get('id', '')
         tweet_url = f"https://twitter.com/{handle}/status/{tweet_id}"
-        media_url = tweet.get("extracted_media")
+        
+        # For articles, try to get the cover image
+        article = tweet.get('article') or {}
+        article_cover = article.get('cover_media') if isinstance(article, dict) else None
+        media_url = tweet.get("extracted_media") or article_cover
+        
+        # For article tweets, get the title for display
+        article_title = article.get('title', '') if isinstance(article, dict) else ''
+        display_text = article_title if article_title else tweet.get('text', '')[:280]
         
         if views > max_views:
             max_views = views
             most_viral_post = {
-                "text": tweet.get('text', '')[:280],
+                "text": display_text,
                 "views": views,
                 "likes": likes,
                 "url": tweet_url,
@@ -735,7 +775,7 @@ def calculate_wrapped_stats(tweets, handle):
         if likes > max_likes:
             max_likes = likes
             most_liked_post = {
-                "text": tweet.get('text', '')[:280],
+                "text": display_text,
                 "views": views,
                 "likes": likes,
                 "url": tweet_url,
@@ -822,17 +862,25 @@ def build_timeline(tweets, handle):
     for tweet in tweets:
         post_date = parse_tweet_date(tweet.get('created_at'))
         if post_date:
-            views = int(tweet.get('views', 0) or 0)
-            likes = int(tweet.get('favorites', 0) or tweet.get('favorite_count', 0) or 0)
+            views = safe_int(tweet.get('views') or tweet.get('view_count') or 0)
+            likes = safe_int(tweet.get('likes') or tweet.get('favorites') or tweet.get('favorite_count') or 0)
             tweet_id = tweet.get('tweet_id') or tweet.get('id_str') or tweet.get('id', '')
+            
+            # For articles, get cover image and title
+            article = tweet.get('article') or {}
+            article_cover = article.get('cover_media') if isinstance(article, dict) else None
+            article_title = article.get('title', '') if isinstance(article, dict) else ''
+            
+            display_text = article_title if article_title else tweet.get('text', '')[:100]
+            media_url = tweet.get("extracted_media") or article_cover
             
             dated_tweets.append({
                 "date": post_date,
                 "views": views,
                 "likes": likes,
-                "text": tweet.get('text', '')[:100],
+                "text": display_text,
                 "url": f"https://twitter.com/{handle}/status/{tweet_id}",
-                "media": tweet.get("extracted_media")
+                "media": media_url
             })
     
     if not dated_tweets:
