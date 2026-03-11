@@ -797,6 +797,7 @@ def calculate_wrapped_stats(tweets, handle):
     
     first_post_date = None
     first_post = None
+    first_post_tweet = None  # Keep reference to enrich later
     
     posts_by_month = defaultdict(int)
     
@@ -853,6 +854,7 @@ def calculate_wrapped_stats(tweets, handle):
         if post_date:
             if first_post_date is None or post_date < first_post_date:
                 first_post_date = post_date
+                first_post_tweet = tweet  # Save tweet reference
                 first_post = {
                     "text": display_text,
                     "date": created_at,
@@ -864,6 +866,30 @@ def calculate_wrapped_stats(tweets, handle):
             
             month_key = post_date.strftime('%Y-%m')
             posts_by_month[month_key] += 1
+    
+    # If first post has no views, try to fetch full data
+    # (old tweets from timeline might not include views)
+    if first_post and first_post_tweet and first_post.get('views', 0) == 0:
+        tweet_id = first_post_tweet.get('tweet_id') or first_post_tweet.get('id_str') or first_post_tweet.get('id', '')
+        if tweet_id:
+            try:
+                full_tweet = fetch_single_tweet(tweet_id)
+                if full_tweet:
+                    enriched_views = safe_int(full_tweet.get('views') or full_tweet.get('view_count') or 0)
+                    enriched_likes = safe_int(full_tweet.get('likes') or full_tweet.get('favorites') or full_tweet.get('favorite_count') or 0)
+                    first_post['views'] = enriched_views
+                    first_post['likes'] = enriched_likes
+                    
+                    # Also get media if missing
+                    if not first_post.get('media'):
+                        article = full_tweet.get('article') or {}
+                        article_cover = article.get('cover_media') if isinstance(article, dict) else None
+                        if article_cover:
+                            first_post['media'] = article_cover
+                    
+                    print(f"Enriched first post {tweet_id}: views={enriched_views}, likes={enriched_likes}")
+            except Exception as e:
+                print(f"Failed to enrich first post: {e}")
     
     streak = calculate_streak(posts_by_month)
     
