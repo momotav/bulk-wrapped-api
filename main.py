@@ -1156,6 +1156,77 @@ def debug_tweets():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/debug-timeline', methods=['GET'])
+def debug_timeline():
+    """
+    Debug endpoint to see what timeline.php returns for a user's tweets
+    Specifically looking for article tweets and their data structure
+    """
+    handle = request.args.get('handle', '')
+    
+    if not handle:
+        return jsonify({"error": "Provide ?handle=<username>"}), 400
+    
+    handle = handle.strip().replace('@', '')
+    
+    headers = {
+        "x-rapidapi-key": RAPIDAPI_KEY,
+        "x-rapidapi-host": RAPIDAPI_HOST
+    }
+    
+    try:
+        url = f"https://{RAPIDAPI_HOST}/timeline.php"
+        response = requests.get(url, headers=headers, params={"screenname": handle}, timeout=15)
+        
+        if response.status_code != 200:
+            return jsonify({"error": f"Failed to fetch @{handle}"}), 400
+        
+        data = response.json()
+        tweets = data.get("timeline", [])
+        
+        # Find article tweets
+        article_tweets = []
+        for i, tweet in enumerate(tweets[:50]):  # Check first 50
+            urls = tweet.get("entities", {}).get("urls", [])
+            has_article_url = False
+            article_url = None
+            
+            for url_obj in urls:
+                expanded = url_obj.get("expanded_url", "") or ""
+                if "/i/article/" in expanded:
+                    has_article_url = True
+                    article_url = expanded
+                    break
+            
+            # Also check if text contains article URL pattern
+            text = tweet.get("text", "")
+            if "/i/article/" in text or "x.com/i/article" in text.lower():
+                has_article_url = True
+            
+            if has_article_url:
+                article_tweets.append({
+                    "index": i,
+                    "tweet_id": tweet.get("tweet_id") or tweet.get("id"),
+                    "text": tweet.get("text", "")[:100],
+                    "views_from_timeline": tweet.get("views"),
+                    "likes_from_timeline": tweet.get("likes") or tweet.get("favorites"),
+                    "has_article_field": "article" in tweet,
+                    "article_field": tweet.get("article"),
+                    "article_url": article_url,
+                    "all_keys": list(tweet.keys())
+                })
+        
+        return jsonify({
+            "handle": handle,
+            "total_tweets_in_page": len(tweets),
+            "article_tweets_found": len(article_tweets),
+            "article_tweets": article_tweets
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/debug-article', methods=['GET'])
 def debug_article():
     """
