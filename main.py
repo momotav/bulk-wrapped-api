@@ -292,6 +292,7 @@ def filter_bulk_tweets(tweets):
     4. Check quoted tweets, articles, notes for keywords
     
     Note: Article content is extracted from tweet.article.full_text by get_full_tweet_text()
+    For article tweets, we fetch full data to get accurate stats.
     """
     bulk_tweets = []
     
@@ -304,6 +305,9 @@ def filter_bulk_tweets(tweets):
     ]
     
     for tweet in tweets:
+        # Check if this is an article tweet - if so, fetch full data for stats
+        tweet = enrich_article_tweet(tweet)
+        
         # Get ALL possible text content from the tweet (includes article.full_text)
         all_text = get_full_tweet_text(tweet)
         text_lower = all_text.lower()
@@ -346,6 +350,66 @@ def filter_bulk_tweets(tweets):
             bulk_tweets.append(tweet)
     
     return bulk_tweets
+
+
+def enrich_article_tweet(tweet):
+    """
+    If tweet is an article (has /i/article/ URL), fetch full tweet data
+    to get accurate stats (views, likes, etc.)
+    """
+    # Check if it's an article tweet
+    urls = tweet.get("entities", {}).get("urls", [])
+    is_article = False
+    for url_obj in urls:
+        expanded = url_obj.get("expanded_url", "") or ""
+        if "/i/article/" in expanded:
+            is_article = True
+            break
+    
+    if not is_article:
+        return tweet
+    
+    # Check if we already have stats (views > 0 means data is present)
+    current_views = safe_int(tweet.get('views') or 0)
+    if current_views > 0:
+        return tweet  # Already has stats
+    
+    # Fetch full tweet data
+    tweet_id = tweet.get('tweet_id') or tweet.get('id_str') or tweet.get('id', '')
+    if not tweet_id:
+        return tweet
+    
+    try:
+        full_tweet = fetch_single_tweet(tweet_id)
+        if full_tweet:
+            # Merge the full data into our tweet, keeping original fields as fallback
+            for key, value in full_tweet.items():
+                if value is not None and value != '':
+                    tweet[key] = value
+            print(f"Enriched article tweet {tweet_id}: views={tweet.get('views')}, likes={tweet.get('likes')}")
+    except Exception as e:
+        print(f"Failed to enrich article tweet {tweet_id}: {e}")
+    
+    return tweet
+
+
+def fetch_single_tweet(tweet_id):
+    """Fetch full data for a single tweet using tweet.php endpoint"""
+    headers = {
+        "x-rapidapi-key": RAPIDAPI_KEY,
+        "x-rapidapi-host": RAPIDAPI_HOST
+    }
+    
+    try:
+        url = f"https://{RAPIDAPI_HOST}/tweet.php"
+        response = requests.get(url, headers=headers, params={"id": tweet_id}, timeout=10)
+        
+        if response.status_code == 200:
+            return response.json()
+        return None
+    except Exception as e:
+        print(f"Error fetching tweet {tweet_id}: {e}")
+        return None
 
 
 def check_and_fetch_article(tweet):
