@@ -354,8 +354,8 @@ def filter_bulk_tweets(tweets):
 
 def enrich_article_tweet(tweet):
     """
-    If tweet is an article (has /i/article/ URL), fetch full tweet data
-    to get accurate stats (views, likes, etc.)
+    If tweet is an article (has /i/article/ URL), ALWAYS fetch full tweet data
+    to get accurate stats (views, likes, etc.) since timeline.php may have incomplete data
     """
     # Check if it's an article tweet
     urls = tweet.get("entities", {}).get("urls", [])
@@ -366,15 +366,15 @@ def enrich_article_tweet(tweet):
             is_article = True
             break
     
+    # Also check text for article URL
+    text = tweet.get("text", "") or ""
+    if "/i/article/" in text:
+        is_article = True
+    
     if not is_article:
         return tweet
     
-    # Check if we already have stats (views > 0 means data is present)
-    current_views = safe_int(tweet.get('views') or 0)
-    if current_views > 0:
-        return tweet  # Already has stats
-    
-    # Fetch full tweet data
+    # ALWAYS fetch full tweet data for articles
     tweet_id = tweet.get('tweet_id') or tweet.get('id_str') or tweet.get('id', '')
     if not tweet_id:
         return tweet
@@ -382,11 +382,11 @@ def enrich_article_tweet(tweet):
     try:
         full_tweet = fetch_single_tweet(tweet_id)
         if full_tweet:
-            # Merge the full data into our tweet, keeping original fields as fallback
+            # Merge the full data into our tweet
             for key, value in full_tweet.items():
                 if value is not None and value != '':
                     tweet[key] = value
-            print(f"Enriched article tweet {tweet_id}: views={tweet.get('views')}, likes={tweet.get('likes')}")
+            print(f"Enriched article tweet {tweet_id}: views={tweet.get('views')}, likes={tweet.get('likes')}, favorites={tweet.get('favorites')}")
     except Exception as e:
         print(f"Failed to enrich article tweet {tweet_id}: {e}")
     
@@ -1154,6 +1154,121 @@ def debug_tweets():
         
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/debug-wrapped', methods=['GET'])
+def debug_wrapped():
+    """
+    Debug endpoint that shows exactly what happens during wrapped generation
+    Specifically tracks article tweets through the entire flow
+    """
+    handle = request.args.get('handle', '')
+    
+    if not handle:
+        return jsonify({"error": "Provide ?handle=<username>"}), 400
+    
+    handle = handle.strip().replace('@', '')
+    
+    try:
+        # Step 1: Fetch some tweets
+        tweets = fetch_user_tweets_debug(handle, max_pages=10)
+        
+        # Step 2: Track article tweets before filtering
+        article_tweets_before = []
+        for tweet in tweets:
+            urls = tweet.get("entities", {}).get("urls", [])
+            for url_obj in urls:
+                expanded = url_obj.get("expanded_url", "") or ""
+                if "/i/article/" in expanded:
+                    article_tweets_before.append({
+                        "tweet_id": tweet.get("tweet_id") or tweet.get("id"),
+                        "views_before": tweet.get("views"),
+                        "likes_before": tweet.get("likes"),
+                        "favorites_before": tweet.get("favorites"),
+                        "has_article_field": "article" in tweet and tweet.get("article") is not None,
+                    })
+                    break
+        
+        # Step 3: Filter tweets (this calls enrich_article_tweet)
+        bulk_tweets = filter_bulk_tweets(tweets)
+        
+        # Step 4: Track article tweets after filtering/enriching
+        article_tweets_after = []
+        for tweet in bulk_tweets:
+            urls = tweet.get("entities", {}).get("urls", [])
+            for url_obj in urls:
+                expanded = url_obj.get("expanded_url", "") or ""
+                if "/i/article/" in expanded:
+                    article_tweets_after.append({
+                        "tweet_id": tweet.get("tweet_id") or tweet.get("id"),
+                        "views_after": tweet.get("views"),
+                        "likes_after": tweet.get("likes"),
+                        "favorites_after": tweet.get("favorites"),
+                        "has_article_field": "article" in tweet and tweet.get("article") is not None,
+                        "article_title": (tweet.get("article") or {}).get("title"),
+                    })
+                    break
+        
+        # Step 5: Calculate stats
+        stats = calculate_wrapped_stats(bulk_tweets, handle)
+        
+        return jsonify({
+            "handle": handle,
+            "total_tweets_scanned": len(tweets),
+            "bulk_tweets_found": len(bulk_tweets),
+            "article_tweets_before_filter": article_tweets_before,
+            "article_tweets_after_filter_and_enrich": article_tweets_after,
+            "most_viral_post": stats.get("most_viral_post"),
+            "most_liked_post": stats.get("most_liked_post"),
+            "total_views": stats.get("total_views"),
+            "total_likes": stats.get("total_likes"),
+        })
+        
+    except Exception as e:
+        import traceback
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
+
+
+def fetch_user_tweets_debug(handle, max_pages=10):
+    """Fetch user tweets for debugging - limited pages"""
+    all_tweets = []
+    cursor = None
+    
+    headers = {
+        "x-rapidapi-key": RAPIDAPI_KEY,
+        "x-rapidapi-host": RAPIDAPI_HOST
+    }
+    
+    for page in range(max_pages):
+        url = f"https://{RAPIDAPI_HOST}/timeline.php"
+        params = {"screenname": handle}
+        
+        if cursor:
+            params["cursor"] = cursor
+        
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=15)
+            
+            if response.status_code != 200:
+                break
+            
+            data = response.json()
+            timeline = data.get("timeline", [])
+            
+            if not timeline:
+                break
+            
+            all_tweets.extend(timeline)
+            cursor = data.get("next_cursor")
+            
+            if not cursor:
+                break
+                
+        except Exception as e:
+            print(f"Error fetching page {page}: {e}")
+            break
+    
+    return all_tweets
 
 
 @app.route('/api/debug-timeline', methods=['GET'])
