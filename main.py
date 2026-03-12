@@ -80,6 +80,22 @@ def get_wrapped():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/debug-vip', methods=['GET'])
+def debug_vip():
+    """Debug endpoint to verify VIP config is deployed"""
+    handle = request.args.get('handle', '').strip().replace('@', '').lower()
+    vip_handles = ['kdotcrypto', 'rizzy_sol', 'junbug_sol', 'glowburger', 'bulktrade']
+    is_vip = handle in vip_handles
+    max_pages = 150 if is_vip else 50
+    return jsonify({
+        "handle": handle,
+        "is_vip": is_vip,
+        "max_pages": max_pages,
+        "vip_handles": vip_handles,
+        "version": "v2_vip_enabled"
+    })
+
+
 @app.route('/api/wrapped/stream', methods=['GET'])
 def get_wrapped_stream():
     """
