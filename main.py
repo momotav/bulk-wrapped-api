@@ -374,7 +374,8 @@ def filter_bulk_tweets(tweets):
         "liquidation", "decentralized", "trading", "community",
         "role", "og", "contributor", "@kdotcrypto", "@rizzy_sol",
         "@glowburger", "@junbug_sol", "bulkgram", "testnet",
-        "airdrop", "token", "sol", "solana", "wrapped", "claim"
+        "airdrop", "token", "sol", "solana", "wrapped", "claim",
+        "bust", "testnet" , "pilled"
     ]
     
     for tweet in tweets:
