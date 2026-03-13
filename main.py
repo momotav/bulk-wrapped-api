@@ -80,63 +80,6 @@ def get_wrapped():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/api/debug-search', methods=['GET'])
-def debug_search():
-    """Debug endpoint to test search API directly"""
-    handle = request.args.get('handle', '').strip().replace('@', '')
-    pages = int(request.args.get('pages', 10))
-    
-    if not handle:
-        return jsonify({"error": "Handle required"}), 400
-    
-    try:
-        search_tweets = search_bulk_mentions(handle, max_pages=pages)
-        
-        # Get info from results
-        tweets_info = []
-        for tweet in search_tweets:
-            tweets_info.append({
-                "id": tweet.get('tweet_id') or tweet.get('id_str'),
-                "date": tweet.get('created_at'),
-                "text": tweet.get('text', '')[:100]
-            })
-        
-        # Sort by date to find oldest
-        sorted_tweets = sorted(tweets_info, key=lambda x: x['date'] if x['date'] else '')
-        
-        return jsonify({
-            "handle": handle,
-            "pages_searched": pages,
-            "total_results": len(search_tweets),
-            "oldest_tweet": sorted_tweets[0] if sorted_tweets else None,
-            "newest_tweet": sorted_tweets[-1] if sorted_tweets else None,
-            "first_10_tweets": tweets_info[:10]
-        })
-        
-    except Exception as e:
-        return jsonify({
-            "error": str(e)
-        })
-
-
-@app.route('/api/debug-vip', methods=['GET'])
-def debug_vip():
-    """Debug endpoint to verify VIP config is deployed"""
-    handle = request.args.get('handle', '').strip().replace('@', '').lower()
-    vip_handles = ['kdotcrypto', 'rizzy_sol', 'junbug_sol', 'glowburger', 'bulktrade']
-    is_vip = handle in vip_handles
-    max_pages = 150 if is_vip else 50
-    return jsonify({
-        "handle": handle,
-        "is_vip": is_vip,
-        "max_pages": max_pages,
-        "vip_handles": vip_handles,
-        "version": "v3_search_enabled"
-    })
-
-
-
-
 @app.route('/api/wrapped/stream', methods=['GET'])
 def get_wrapped_stream():
     """
@@ -159,10 +102,7 @@ def get_wrapped_stream():
             # Step 2: Fetch tweets with progress
             all_tweets = []
             cursor = None
-            
-            # VIP handles get more pages to find older tweets (back to May 2024)
-            vip_handles = ['kdotcrypto', 'rizzy_sol', 'junbug_sol', 'glowburger', 'bulktrade']
-            max_pages = 150 if handle.lower() in vip_handles else 50
+            max_pages = 50
             
             headers = {
                 "x-rapidapi-key": RAPIDAPI_KEY,
@@ -171,8 +111,7 @@ def get_wrapped_stream():
             
             for page in range(max_pages):
                 progress = 5 + int((page / max_pages) * 75)  # 5-80%
-                vip_note = " (deep scan)" if handle.lower() in vip_handles else ""
-                yield f"data: {json.dumps({'step': 'scanning', 'message': f'Scanning page {page + 1}/{max_pages}{vip_note}...', 'progress': progress, 'tweets_found': len(all_tweets)})}\n\n"
+                yield f"data: {json.dumps({'step': 'scanning', 'message': f'Scanning page {page + 1}...', 'progress': progress, 'tweets_found': len(all_tweets)})}\n\n"
                 
                 url = f"https://{RAPIDAPI_HOST}/timeline.php"
                 params = {"screenname": handle}
@@ -211,18 +150,6 @@ def get_wrapped_stream():
                         yield f"data: {json.dumps({'step': 'error', 'error': str(e)})}\n\n"
                         return
                     break
-            
-            # Step 2b: For VIP users, also search for @bulktrade mentions to find older tweets
-            if handle.lower() in vip_handles:
-                yield f"data: {json.dumps({'step': 'searching', 'message': 'Searching for older @bulktrade mentions...', 'progress': 82})}\n\n"
-                search_tweets = search_bulk_mentions(handle, max_pages=100)
-                if search_tweets:
-                    original_count = len(all_tweets)
-                    all_tweets = merge_tweets(all_tweets, search_tweets)
-                    new_found = len(all_tweets) - original_count
-                    yield f"data: {json.dumps({'step': 'searching', 'message': f'Found {new_found} additional tweets from search ({len(search_tweets)} total searched)', 'progress': 84})}\n\n"
-                else:
-                    yield f"data: {json.dumps({'step': 'searching', 'message': 'No additional tweets found from search', 'progress': 84})}\n\n"
             
             # Step 3: Filter tweets
             yield f"data: {json.dumps({'step': 'filtering', 'message': f'Found {len(all_tweets)} tweets, filtering for BULK...', 'progress': 85})}\n\n"
@@ -311,10 +238,7 @@ def fetch_user_tweets(handle):
     """Fetch user tweets (non-streaming version)"""
     all_tweets = []
     cursor = None
-    
-    # VIP handles get more pages to find older tweets
-    vip_handles = ['kdotcrypto', 'rizzy_sol', 'junbug_sol', 'glowburger', 'bulktrade']
-    max_pages = 150 if handle.lower() in vip_handles else 50
+    max_pages = 50
     
     headers = {
         "x-rapidapi-key": RAPIDAPI_KEY,
@@ -441,6 +365,7 @@ def filter_bulk_tweets(tweets):
     
     Note: Article content is extracted from tweet.article.full_text by get_full_tweet_text()
     For article tweets, we fetch full data to get accurate stats.
+    Retweets are excluded - we only count original posts.
     """
     bulk_tweets = []
     
@@ -453,6 +378,17 @@ def filter_bulk_tweets(tweets):
     ]
     
     for tweet in tweets:
+        # Skip retweets - only count original posts
+        if tweet.get("retweeted_status") or tweet.get("retweeted_tweet"):
+            continue
+        if tweet.get("is_retweet") == True:
+            continue
+        if tweet.get("retweet") == True:
+            continue
+        text = tweet.get("text", "") or ""
+        if text.strip().startswith("RT @"):
+            continue
+        
         # Check if this is an article tweet - if so, fetch full data for stats
         tweet = enrich_article_tweet(tweet)
         
