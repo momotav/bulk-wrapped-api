@@ -96,6 +96,80 @@ def debug_vip():
     })
 
 
+@app.route('/api/debug-daterange', methods=['GET'])
+def debug_daterange():
+    """Debug endpoint to see the date range of tweets we're fetching"""
+    handle = request.args.get('handle', '').strip().replace('@', '')
+    pages = int(request.args.get('pages', 150))
+    
+    if not handle:
+        return jsonify({"error": "Handle required"}), 400
+    
+    all_tweets = []
+    cursor = None
+    
+    headers = {
+        "x-rapidapi-key": RAPIDAPI_KEY,
+        "x-rapidapi-host": RAPIDAPI_HOST
+    }
+    
+    for page in range(pages):
+        url = f"https://{RAPIDAPI_HOST}/timeline.php"
+        params = {"screenname": handle}
+        if cursor:
+            params["cursor"] = cursor
+        
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=15)
+            if response.status_code != 200:
+                break
+            
+            data = response.json()
+            timeline = data.get("timeline", [])
+            
+            if not timeline:
+                break
+            
+            all_tweets.extend(timeline)
+            cursor = data.get("next_cursor")
+            
+            if not cursor:
+                break
+        except:
+            break
+    
+    # Get dates
+    dates = []
+    for tweet in all_tweets:
+        created_at = tweet.get('created_at', '')
+        if created_at:
+            dates.append(created_at)
+    
+    # Find oldest and newest
+    oldest = dates[-1] if dates else None
+    newest = dates[0] if dates else None
+    
+    # Filter for bulk tweets
+    bulk_tweets = filter_bulk_tweets(all_tweets)
+    bulk_dates = []
+    for tweet in bulk_tweets:
+        created_at = tweet.get('created_at', '')
+        if created_at:
+            bulk_dates.append(created_at)
+    
+    oldest_bulk = bulk_dates[-1] if bulk_dates else None
+    
+    return jsonify({
+        "handle": handle,
+        "pages_fetched": pages,
+        "total_tweets": len(all_tweets),
+        "newest_tweet": newest,
+        "oldest_tweet": oldest,
+        "bulk_tweets_found": len(bulk_tweets),
+        "oldest_bulk_tweet": oldest_bulk
+    })
+
+
 @app.route('/api/wrapped/stream', methods=['GET'])
 def get_wrapped_stream():
     """
