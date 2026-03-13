@@ -80,6 +80,62 @@ def get_wrapped():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/debug-search', methods=['GET'])
+def debug_search():
+    """Debug endpoint to test search API directly"""
+    handle = request.args.get('handle', '').strip().replace('@', '')
+    
+    if not handle:
+        return jsonify({"error": "Handle required"}), 400
+    
+    headers = {
+        "x-rapidapi-key": RAPIDAPI_KEY,
+        "x-rapidapi-host": RAPIDAPI_HOST
+    }
+    
+    search_query = f"@bulktrade from:{handle}"
+    url = f"https://{RAPIDAPI_HOST}/search.php"
+    params = {
+        "query": search_query,
+        "search_type": "Latest"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=15)
+        
+        if response.status_code != 200:
+            return jsonify({
+                "error": f"Search API returned {response.status_code}",
+                "query": search_query,
+                "response_text": response.text[:500]
+            })
+        
+        data = response.json()
+        timeline = data.get("timeline", [])
+        
+        # Get dates from results
+        tweets_info = []
+        for tweet in timeline[:10]:  # First 10
+            tweets_info.append({
+                "id": tweet.get('tweet_id') or tweet.get('id_str'),
+                "date": tweet.get('created_at'),
+                "text": tweet.get('text', '')[:100]
+            })
+        
+        return jsonify({
+            "query": search_query,
+            "total_results": len(timeline),
+            "has_next_cursor": bool(data.get("next_cursor")),
+            "first_10_tweets": tweets_info
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "error": str(e),
+            "query": search_query
+        })
+
+
 @app.route('/api/debug-vip', methods=['GET'])
 def debug_vip():
     """Debug endpoint to verify VIP config is deployed"""
@@ -92,82 +148,10 @@ def debug_vip():
         "is_vip": is_vip,
         "max_pages": max_pages,
         "vip_handles": vip_handles,
-        "version": "v2_vip_enabled"
+        "version": "v3_search_enabled"
     })
 
 
-@app.route('/api/debug-daterange', methods=['GET'])
-def debug_daterange():
-    """Debug endpoint to see the date range of tweets we're fetching"""
-    handle = request.args.get('handle', '').strip().replace('@', '')
-    pages = int(request.args.get('pages', 150))
-    
-    if not handle:
-        return jsonify({"error": "Handle required"}), 400
-    
-    all_tweets = []
-    cursor = None
-    
-    headers = {
-        "x-rapidapi-key": RAPIDAPI_KEY,
-        "x-rapidapi-host": RAPIDAPI_HOST
-    }
-    
-    for page in range(pages):
-        url = f"https://{RAPIDAPI_HOST}/timeline.php"
-        params = {"screenname": handle}
-        if cursor:
-            params["cursor"] = cursor
-        
-        try:
-            response = requests.get(url, headers=headers, params=params, timeout=15)
-            if response.status_code != 200:
-                break
-            
-            data = response.json()
-            timeline = data.get("timeline", [])
-            
-            if not timeline:
-                break
-            
-            all_tweets.extend(timeline)
-            cursor = data.get("next_cursor")
-            
-            if not cursor:
-                break
-        except:
-            break
-    
-    # Get dates
-    dates = []
-    for tweet in all_tweets:
-        created_at = tweet.get('created_at', '')
-        if created_at:
-            dates.append(created_at)
-    
-    # Find oldest and newest
-    oldest = dates[-1] if dates else None
-    newest = dates[0] if dates else None
-    
-    # Filter for bulk tweets
-    bulk_tweets = filter_bulk_tweets(all_tweets)
-    bulk_dates = []
-    for tweet in bulk_tweets:
-        created_at = tweet.get('created_at', '')
-        if created_at:
-            bulk_dates.append(created_at)
-    
-    oldest_bulk = bulk_dates[-1] if bulk_dates else None
-    
-    return jsonify({
-        "handle": handle,
-        "pages_fetched": pages,
-        "total_tweets": len(all_tweets),
-        "newest_tweet": newest,
-        "oldest_tweet": oldest,
-        "bulk_tweets_found": len(bulk_tweets),
-        "oldest_bulk_tweet": oldest_bulk
-    })
 
 
 @app.route('/api/wrapped/stream', methods=['GET'])
@@ -244,6 +228,16 @@ def get_wrapped_stream():
                         yield f"data: {json.dumps({'step': 'error', 'error': str(e)})}\n\n"
                         return
                     break
+            
+            # Step 2b: For VIP users, also search for @bulktrade mentions to find older tweets
+            if handle.lower() in vip_handles:
+                yield f"data: {json.dumps({'step': 'searching', 'message': 'Searching for older @bulktrade mentions...', 'progress': 82})}\n\n"
+                search_tweets = search_bulk_mentions(handle, max_pages=30)
+                if search_tweets:
+                    original_count = len(all_tweets)
+                    all_tweets = merge_tweets(all_tweets, search_tweets)
+                    new_found = len(all_tweets) - original_count
+                    yield f"data: {json.dumps({'step': 'searching', 'message': f'Found {new_found} additional tweets from search', 'progress': 84})}\n\n"
             
             # Step 3: Filter tweets
             yield f"data: {json.dumps({'step': 'filtering', 'message': f'Found {len(all_tweets)} tweets, filtering for BULK...', 'progress': 85})}\n\n"
@@ -377,6 +371,78 @@ def fetch_user_tweets(handle):
             break
     
     return all_tweets
+
+
+def search_bulk_mentions(handle, max_pages=20):
+    """
+    Search for @bulktrade mentions from a specific user.
+    This can find older tweets that timeline pagination doesn't reach.
+    """
+    all_tweets = []
+    cursor = None
+    
+    headers = {
+        "x-rapidapi-key": RAPIDAPI_KEY,
+        "x-rapidapi-host": RAPIDAPI_HOST
+    }
+    
+    # Search query: @bulktrade from the user
+    search_query = f"@bulktrade from:{handle}"
+    
+    for page in range(max_pages):
+        url = f"https://{RAPIDAPI_HOST}/search.php"
+        params = {
+            "query": search_query,
+            "search_type": "Latest"
+        }
+        
+        if cursor:
+            params["cursor"] = cursor
+        
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=15)
+            
+            if response.status_code != 200:
+                print(f"Search API error: {response.status_code}")
+                break
+            
+            data = response.json()
+            timeline = data.get("timeline", [])
+            
+            if not timeline:
+                break
+            
+            all_tweets.extend(timeline)
+            cursor = data.get("next_cursor")
+            
+            if not cursor:
+                break
+                
+        except requests.exceptions.Timeout:
+            print(f"Search timeout at page {page}")
+            break
+        except Exception as e:
+            print(f"Search error: {e}")
+            break
+    
+    print(f"Search found {len(all_tweets)} @bulktrade mentions from {handle}")
+    return all_tweets
+
+
+def merge_tweets(timeline_tweets, search_tweets):
+    """
+    Merge tweets from timeline and search, removing duplicates by tweet_id.
+    """
+    seen_ids = set()
+    merged = []
+    
+    for tweet in timeline_tweets + search_tweets:
+        tweet_id = tweet.get('tweet_id') or tweet.get('id_str') or tweet.get('id', '')
+        if tweet_id and tweet_id not in seen_ids:
+            seen_ids.add(tweet_id)
+            merged.append(tweet)
+    
+    return merged
 
 
 def filter_bulk_tweets(tweets):
