@@ -282,78 +282,6 @@ def fetch_user_tweets(handle):
     return all_tweets
 
 
-def search_bulk_mentions(handle, max_pages=20):
-    """
-    Search for @bulktrade mentions from a specific user.
-    This can find older tweets that timeline pagination doesn't reach.
-    """
-    all_tweets = []
-    cursor = None
-    
-    headers = {
-        "x-rapidapi-key": RAPIDAPI_KEY,
-        "x-rapidapi-host": RAPIDAPI_HOST
-    }
-    
-    # Search query: @bulktrade from the user
-    search_query = f"@bulktrade from:{handle}"
-    
-    for page in range(max_pages):
-        url = f"https://{RAPIDAPI_HOST}/search.php"
-        params = {
-            "query": search_query,
-            "search_type": "Latest"
-        }
-        
-        if cursor:
-            params["cursor"] = cursor
-        
-        try:
-            response = requests.get(url, headers=headers, params=params, timeout=15)
-            
-            if response.status_code != 200:
-                print(f"Search API error: {response.status_code}")
-                break
-            
-            data = response.json()
-            timeline = data.get("timeline", [])
-            
-            if not timeline:
-                break
-            
-            all_tweets.extend(timeline)
-            cursor = data.get("next_cursor")
-            
-            if not cursor:
-                break
-                
-        except requests.exceptions.Timeout:
-            print(f"Search timeout at page {page}")
-            break
-        except Exception as e:
-            print(f"Search error: {e}")
-            break
-    
-    print(f"Search found {len(all_tweets)} @bulktrade mentions from {handle}")
-    return all_tweets
-
-
-def merge_tweets(timeline_tweets, search_tweets):
-    """
-    Merge tweets from timeline and search, removing duplicates by tweet_id.
-    """
-    seen_ids = set()
-    merged = []
-    
-    for tweet in timeline_tweets + search_tweets:
-        tweet_id = tweet.get('tweet_id') or tweet.get('id_str') or tweet.get('id', '')
-        if tweet_id and tweet_id not in seen_ids:
-            seen_ids.add(tweet_id)
-            merged.append(tweet)
-    
-    return merged
-
-
 def filter_bulk_tweets(tweets):
     """
     Filter tweets related to BULK project.
@@ -365,7 +293,6 @@ def filter_bulk_tweets(tweets):
     
     Note: Article content is extracted from tweet.article.full_text by get_full_tweet_text()
     For article tweets, we fetch full data to get accurate stats.
-    Retweets are excluded - we only count original posts.
     """
     bulk_tweets = []
     
@@ -378,17 +305,6 @@ def filter_bulk_tweets(tweets):
     ]
     
     for tweet in tweets:
-        # Skip retweets - only count original posts
-        if tweet.get("retweeted_status") or tweet.get("retweeted_tweet"):
-            continue
-        if tweet.get("is_retweet") == True:
-            continue
-        if tweet.get("retweet") == True:
-            continue
-        text = tweet.get("text", "") or ""
-        if text.strip().startswith("RT @"):
-            continue
-        
         # Check if this is an article tweet - if so, fetch full data for stats
         tweet = enrich_article_tweet(tweet)
         
@@ -489,22 +405,7 @@ def fetch_single_tweet(tweet_id):
         response = requests.get(url, headers=headers, params={"id": tweet_id}, timeout=10)
         
         if response.status_code == 200:
-            data = response.json()
-            
-            # Check for various error indicators
-            if data is None:
-                return None
-            if isinstance(data, dict):
-                # API returns error field for deleted/unavailable tweets
-                if data.get('error') or data.get('errors'):
-                    print(f"Tweet {tweet_id} unavailable: {data.get('error') or data.get('errors')}")
-                    return None
-                # Check if essential fields are missing (indicates bad data)
-                if not data.get('text') and not data.get('full_text'):
-                    print(f"Tweet {tweet_id} has no text content, may be deleted")
-                    return None
-            
-            return data
+            return response.json()
         return None
     except Exception as e:
         print(f"Error fetching tweet {tweet_id}: {e}")
@@ -894,8 +795,9 @@ def calculate_wrapped_stats(tweets, handle):
     max_views = 0
     max_likes = 0
     
-    # Collect all tweets with parsed dates for first_post selection
-    tweets_with_dates = []
+    first_post_date = None
+    first_post = None
+    first_post_tweet = None  # Keep reference to enrich later
     
     posts_by_month = defaultdict(int)
     
@@ -950,80 +852,44 @@ def calculate_wrapped_stats(tweets, handle):
         post_date = parse_tweet_date(created_at)
         
         if post_date:
-            # Store tweet data for first_post selection
-            tweets_with_dates.append({
-                "tweet": tweet,
-                "post_date": post_date,
-                "display_text": display_text,
-                "views": views,
-                "likes": likes,
-                "tweet_url": tweet_url,
-                "media_url": media_url,
-                "created_at": created_at,
-                "tweet_id": tweet_id
-            })
+            if first_post_date is None or post_date < first_post_date:
+                first_post_date = post_date
+                first_post_tweet = tweet  # Save tweet reference
+                first_post = {
+                    "text": display_text,
+                    "date": created_at,
+                    "url": tweet_url,
+                    "views": views,
+                    "likes": likes,
+                    "media": media_url
+                }
             
             month_key = post_date.strftime('%Y-%m')
             posts_by_month[month_key] += 1
     
-    # Sort by date (oldest first) and find the first valid tweet
-    tweets_with_dates.sort(key=lambda x: x["post_date"])
-    
-    first_post = None
-    first_post_date = None
-    
-    # Try oldest tweets until we find one that exists
-    for candidate in tweets_with_dates[:5]:  # Check up to 5 oldest tweets
-        tweet_id = candidate["tweet_id"]
-        
-        # Try to fetch the tweet to verify it exists
-        try:
-            full_tweet = fetch_single_tweet(tweet_id)
-            
-            # Check if tweet was deleted/unavailable
-            if full_tweet is None or full_tweet.get('error'):
-                print(f"First post candidate {tweet_id} appears deleted, trying next...")
-                continue
-            
-            # Tweet exists! Use it
-            enriched_views = safe_int(full_tweet.get('views') or full_tweet.get('view_count') or candidate["views"])
-            enriched_likes = safe_int(full_tweet.get('likes') or full_tweet.get('favorites') or full_tweet.get('favorite_count') or candidate["likes"])
-            
-            # Get media from full tweet if missing
-            media = candidate["media_url"]
-            if not media:
-                article = full_tweet.get('article') or {}
-                media = article.get('cover_media') if isinstance(article, dict) else None
-            
-            first_post = {
-                "text": candidate["display_text"],
-                "date": candidate["created_at"],
-                "url": candidate["tweet_url"],
-                "views": enriched_views,
-                "likes": enriched_likes,
-                "media": media
-            }
-            first_post_date = candidate["post_date"]
-            print(f"Found valid first post {tweet_id}: views={enriched_views}, likes={enriched_likes}")
-            break
-            
-        except Exception as e:
-            print(f"Error checking first post candidate {tweet_id}: {e}")
-            continue
-    
-    # Fallback: if no valid tweet found via API, use the oldest from timeline
-    if first_post is None and tweets_with_dates:
-        candidate = tweets_with_dates[0]
-        first_post = {
-            "text": candidate["display_text"],
-            "date": candidate["created_at"],
-            "url": candidate["tweet_url"],
-            "views": candidate["views"],
-            "likes": candidate["likes"],
-            "media": candidate["media_url"]
-        }
-        first_post_date = candidate["post_date"]
-        print(f"Using fallback first post (couldn't verify via API)")
+    # If first post has no views, try to fetch full data
+    # (old tweets from timeline might not include views)
+    if first_post and first_post_tweet and first_post.get('views', 0) == 0:
+        tweet_id = first_post_tweet.get('tweet_id') or first_post_tweet.get('id_str') or first_post_tweet.get('id', '')
+        if tweet_id:
+            try:
+                full_tweet = fetch_single_tweet(tweet_id)
+                if full_tweet:
+                    enriched_views = safe_int(full_tweet.get('views') or full_tweet.get('view_count') or 0)
+                    enriched_likes = safe_int(full_tweet.get('likes') or full_tweet.get('favorites') or full_tweet.get('favorite_count') or 0)
+                    first_post['views'] = enriched_views
+                    first_post['likes'] = enriched_likes
+                    
+                    # Also get media if missing
+                    if not first_post.get('media'):
+                        article = full_tweet.get('article') or {}
+                        article_cover = article.get('cover_media') if isinstance(article, dict) else None
+                        if article_cover:
+                            first_post['media'] = article_cover
+                    
+                    print(f"Enriched first post {tweet_id}: views={enriched_views}, likes={enriched_likes}")
+            except Exception as e:
+                print(f"Failed to enrich first post: {e}")
     
     streak = calculate_streak(posts_by_month)
     
@@ -1382,8 +1248,6 @@ def debug_wrapped():
             "article_tweets_after_filter_and_enrich": article_tweets_after,
             "most_viral_post": stats.get("most_viral_post"),
             "most_liked_post": stats.get("most_liked_post"),
-            "first_post": stats.get("first_post"),
-            "first_post_date": stats.get("first_post_date"),
             "total_views": stats.get("total_views"),
             "total_likes": stats.get("total_likes"),
         })
