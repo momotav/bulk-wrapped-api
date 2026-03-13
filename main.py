@@ -84,55 +84,38 @@ def get_wrapped():
 def debug_search():
     """Debug endpoint to test search API directly"""
     handle = request.args.get('handle', '').strip().replace('@', '')
+    pages = int(request.args.get('pages', 10))
     
     if not handle:
         return jsonify({"error": "Handle required"}), 400
     
-    headers = {
-        "x-rapidapi-key": RAPIDAPI_KEY,
-        "x-rapidapi-host": RAPIDAPI_HOST
-    }
-    
-    search_query = f"@bulktrade from:{handle}"
-    url = f"https://{RAPIDAPI_HOST}/search.php"
-    params = {
-        "query": search_query,
-        "search_type": "Latest"
-    }
-    
     try:
-        response = requests.get(url, headers=headers, params=params, timeout=15)
+        search_tweets = search_bulk_mentions(handle, max_pages=pages)
         
-        if response.status_code != 200:
-            return jsonify({
-                "error": f"Search API returned {response.status_code}",
-                "query": search_query,
-                "response_text": response.text[:500]
-            })
-        
-        data = response.json()
-        timeline = data.get("timeline", [])
-        
-        # Get dates from results
+        # Get info from results
         tweets_info = []
-        for tweet in timeline[:10]:  # First 10
+        for tweet in search_tweets:
             tweets_info.append({
                 "id": tweet.get('tweet_id') or tweet.get('id_str'),
                 "date": tweet.get('created_at'),
                 "text": tweet.get('text', '')[:100]
             })
         
+        # Sort by date to find oldest
+        sorted_tweets = sorted(tweets_info, key=lambda x: x['date'] if x['date'] else '')
+        
         return jsonify({
-            "query": search_query,
-            "total_results": len(timeline),
-            "has_next_cursor": bool(data.get("next_cursor")),
-            "first_10_tweets": tweets_info
+            "handle": handle,
+            "pages_searched": pages,
+            "total_results": len(search_tweets),
+            "oldest_tweet": sorted_tweets[0] if sorted_tweets else None,
+            "newest_tweet": sorted_tweets[-1] if sorted_tweets else None,
+            "first_10_tweets": tweets_info[:10]
         })
         
     except Exception as e:
         return jsonify({
-            "error": str(e),
-            "query": search_query
+            "error": str(e)
         })
 
 
@@ -232,12 +215,14 @@ def get_wrapped_stream():
             # Step 2b: For VIP users, also search for @bulktrade mentions to find older tweets
             if handle.lower() in vip_handles:
                 yield f"data: {json.dumps({'step': 'searching', 'message': 'Searching for older @bulktrade mentions...', 'progress': 82})}\n\n"
-                search_tweets = search_bulk_mentions(handle, max_pages=30)
+                search_tweets = search_bulk_mentions(handle, max_pages=100)
                 if search_tweets:
                     original_count = len(all_tweets)
                     all_tweets = merge_tweets(all_tweets, search_tweets)
                     new_found = len(all_tweets) - original_count
-                    yield f"data: {json.dumps({'step': 'searching', 'message': f'Found {new_found} additional tweets from search', 'progress': 84})}\n\n"
+                    yield f"data: {json.dumps({'step': 'searching', 'message': f'Found {new_found} additional tweets from search ({len(search_tweets)} total searched)', 'progress': 84})}\n\n"
+                else:
+                    yield f"data: {json.dumps({'step': 'searching', 'message': 'No additional tweets found from search', 'progress': 84})}\n\n"
             
             # Step 3: Filter tweets
             yield f"data: {json.dumps({'step': 'filtering', 'message': f'Found {len(all_tweets)} tweets, filtering for BULK...', 'progress': 85})}\n\n"
